@@ -94,7 +94,7 @@ Constraint: `unique (competitor_id, url)`.
 |---|---|---|
 | id | uuid | PK |
 | snapshot_id | uuid | FK → snapshots, `on delete cascade`, **unique** (one signal per snapshot) |
-| prior_snapshot_id | uuid | FK → snapshots, nullable |
+| prior_snapshot_id | uuid | FK → snapshots, nullable, `on delete set null` (deleting the referenced snapshot clears this pointer rather than blocking the delete) |
 | diff_text | text | the extracted diff |
 | classification | signal_classification | not null |
 | theme | text | e.g. "pricing", "roadmap", "hiring" |
@@ -140,7 +140,7 @@ Composite PK: `(insight_id, signal_id)`.
 create index on snapshots (source_id, fetched_at desc);
 create index on snapshots (content_hash);
 create index on signals (classification);
-create index on signals using ivfflat (embedding vector_cosine_ops);
+create index on signals using hnsw (embedding vector_cosine_ops);
 create index on insights (status);
 ```
 
