@@ -503,15 +503,17 @@ with c as (
   insert into insights (competitor_id, materiality_score, confidence, rationale)
   select competitor_id, 6, 'medium', 'Test rationale citing the snapshot above' from s
   returning id
+), isig as (
+  insert into insight_signals (insight_id, signal_id)
+  select ins.id, sig.id from ins, sig
+  returning insight_id
 )
-insert into insight_signals (insight_id, signal_id)
-select ins.id, sig.id from ins, sig;
-
-insert into feedback (insight_id, rating)
-select id, 'useful' from insights where competitor_id = (select id from competitors where name = 'E2E Test Co');
+insert into feedback (insight_id, rating, comment)
+select insight_id, 'useful', 'e2e-fixture' from isig
+returning id, insight_id;
 ```
 
-Expected: all statements succeed, no errors.
+Expected: all statements succeed, no errors. Note the returned `insight_id` — Step 2 scopes its `insight_signals` check to it.
 
 - [ ] **Step 2: Verify cascade delete removes the full chain**
 
@@ -535,10 +537,11 @@ select
   (select count(*) from snapshots where content_hash = 'hash1') as snapshots,
   (select count(*) from signals where theme = 'pricing' and summary = 'Starter plan price point captured') as signals,
   (select count(*) from insights where rationale = 'Test rationale citing the snapshot above') as insights,
-  (select count(*) from feedback where rating = 'useful' and comment is null) as feedback_rows_matching;
+  (select count(*) from insight_signals where insight_id = '<insight-id-from-step-1>') as insight_signals,
+  (select count(*) from feedback where comment = 'e2e-fixture') as feedback;
 ```
 
-Expected: every count is `0` — confirms the `on delete cascade` chain reaches all five descendant tables (this is the Review Focus item on cascade integrity). If any count is nonzero, find the table whose foreign key is missing `on delete cascade` and fix the corresponding migration file, then re-apply as a new migration (don't edit an already-applied migration file).
+Expected: every count is `0` — confirms the `on delete cascade` chain reaches all six descendant tables (this is the Review Focus item on cascade integrity). Scope every assertion to a value unique to this fixture (the `comment = 'e2e-fixture'` tag, not `rating = 'useful' and comment is null` — the latter matches any unrelated row and would pass even if cascade were broken) and count `insight_signals` explicitly — it is a descendant of two cascade paths at once and the easiest one to silently skip. If any count is nonzero, find the table whose foreign key is missing `on delete cascade` and fix the corresponding migration file, then re-apply as a new migration (don't edit an already-applied migration file).
 
 - [ ] **Step 3: Update README**
 
