@@ -32,7 +32,20 @@ def test_strips_leading_and_trailing_whitespace():
 
 def test_real_sonar_pricing_page_has_no_script_json_leakage():
     html = FIXTURE.read_text()
+
+    # Sanity-check the fixture itself still carries the script-embedded
+    # JSON these assertions depend on catching — if a future re-capture
+    # drops these markers, this fails loudly instead of the test below
+    # silently passing for the wrong reason (this happened once already:
+    # the fixture never contained "__NEXT_DATA__"/'"props":', the markers
+    # this test originally checked for, since Sonar uses Next.js App
+    # Router rather than Pages Router; that version passed vacuously).
+    assert "self.__next_f" in html
+    assert "AggregateOffer" in html
+    assert "dataLayer" in html
+
     result = extract_text(html)
-    assert "__NEXT_DATA__" not in result
-    assert '"props":' not in result
+    assert "self.__next_f" not in result
+    assert "AggregateOffer" not in result
+    assert "dataLayer" not in result
     assert "1.25" in result

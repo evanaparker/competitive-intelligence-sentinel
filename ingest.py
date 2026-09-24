@@ -21,8 +21,17 @@ def run(client) -> list[dict]:
             insert_snapshot(client, source["id"], text, content_hash)
             results.append({"url": url, "changed": changed, "error": None})
         except Exception as e:
-            results.append({"url": url, "changed": False, "error": str(e)})
+            results.append({"url": url, "changed": False, "error": f"{type(e).__name__}: {e}"})
     return results
+
+
+def format_line(r: dict) -> str:
+    if r["error"] is not None:
+        return f"ERROR   {r['url']}: {r['error']}"
+    elif r["changed"]:
+        return f"CHANGED {r['url']}"
+    else:
+        return f"SAME    {r['url']}"
 
 
 if __name__ == "__main__":
@@ -30,10 +39,5 @@ if __name__ == "__main__":
     client = get_client()
     results = run(client)
     for r in results:
-        if r["error"]:
-            print(f"ERROR   {r['url']}: {r['error']}")
-        elif r["changed"]:
-            print(f"CHANGED {r['url']}")
-        else:
-            print(f"SAME    {r['url']}")
-    sys.exit(0)
+        print(format_line(r))
+    sys.exit(1 if any(r["error"] is not None for r in results) else 0)

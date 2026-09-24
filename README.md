@@ -25,11 +25,27 @@ Connect with the `service_role` key — never the anon/publishable key, and neve
 ## Running ingestion
 
 ```bash
-pip3 install --target=.deps -r requirements.txt  # this environment has no python3-venv and no sudo; --target keeps it local, no system changes
+pip3 install --target=.deps -r requirements.txt
 cp .env.example .env  # fill in SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY
 PYTHONPATH=.deps python3 ingest.py
 ```
 
-Fetches every active source in `sources`, stores a new `snapshots` row every run (whether or not the content changed), and prints one line per source: `SAME`, `CHANGED`, or `ERROR`. Currently tracks one source: Sonar's pricing page.
+This environment has no `python3-venv` and no sudo access to install it, and `pip install --user` is blocked by PEP 668's externally-managed-environment guard — `--target=.deps` keeps everything local to the project with no system Python changes. If your environment has a working `python3 -m venv`, that's fine too — use `.venv/bin/pip install -r requirements.txt` and `.venv/bin/python ingest.py` instead. Either way, exit code is `1` if any source errored, `0` otherwise.
 
-If your environment has a working `python3 -m venv`, that works too — just use `.venv/bin/pip install -r requirements.txt` and `.venv/bin/python ingest.py` instead.
+Fetches every active source in `sources`, stores a new `snapshots` row every run (whether or not the content changed), and prints one line per source: `SAME`, `CHANGED`, or `ERROR`.
+
+Currently tracks one source, seeded directly via SQL (no watchlist UI yet):
+
+```sql
+insert into competitors (name, website) values ('Sonar', 'https://sonar.software') returning id;
+insert into sources (competitor_id, source_type, url)
+values ('<id-from-above>', 'pricing_page', 'https://sonar.software/pricing');
+```
+
+### Running tests
+
+```bash
+PYTHONPATH=.deps python3 -m pytest tests/ -v
+```
+
+`hashing.py`, `extract.py`, and `fetch.py` are covered by local unit tests (no network or database). `ingest.py`'s orchestration logic (`tests/test_ingest.py`) is covered with the DB/network calls monkeypatched. `db.py`'s three data-access functions have no local test — they're verified by actually running against the live Supabase project (see the implementation plan's Task 5 for how).
