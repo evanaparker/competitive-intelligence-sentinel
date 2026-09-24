@@ -2,9 +2,9 @@
 
 Tracks material changes in your competitor's online presence.
 
-PoC para el capstone de PM Agentic AI (Cohort 10). Monitorea fuentes públicas de competidores (pricing, changelog, G2, job boards) y genera insights de materialidad citando evidencia.
+PoC for the PM Agentic AI capstone (Cohort 10). Monitors public competitor sources (pricing, changelog, G2, job boards) and generates materiality-scored insights citing supporting evidence.
 
-## Componentes
+## Components
 
 1. Source Ingestion
 2. Change Detection
