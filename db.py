@@ -46,6 +46,70 @@ def insert_snapshot(client: Client, source_id: str, content: str, content_hash: 
     return response.data[0]
 
 
+def get_material_signals(client: Client) -> list[dict]:
+    response = (
+        client.table("signals")
+        .select("id, snapshot_id, theme, summary, diff_text")
+        .eq("classification", "material")
+        .execute()
+    )
+    return response.data
+
+
+def get_signal_ids_with_insight(client: Client) -> set[str]:
+    response = client.table("insight_signals").select("signal_id").execute()
+    return {row["signal_id"] for row in response.data}
+
+
+def get_snapshot(client: Client, snapshot_id: str) -> dict:
+    response = (
+        client.table("snapshots")
+        .select("id, source_id, content_hash, fetched_at")
+        .eq("id", snapshot_id)
+        .limit(1)
+        .execute()
+    )
+    return response.data[0]
+
+
+def get_competitor(client: Client, competitor_id: str) -> dict:
+    response = (
+        client.table("competitors")
+        .select("id, name")
+        .eq("id", competitor_id)
+        .limit(1)
+        .execute()
+    )
+    return response.data[0]
+
+
+def insert_insight(
+    client: Client, competitor_id: str, materiality_score: int, confidence: str, rationale: str
+) -> dict:
+    response = (
+        client.table("insights")
+        .insert(
+            {
+                "competitor_id": competitor_id,
+                "materiality_score": materiality_score,
+                "confidence": confidence,
+                "rationale": rationale,
+            }
+        )
+        .execute()
+    )
+    return response.data[0]
+
+
+def insert_insight_signal(client: Client, insight_id: str, signal_id: str) -> dict:
+    response = (
+        client.table("insight_signals")
+        .insert({"insight_id": insight_id, "signal_id": signal_id})
+        .execute()
+    )
+    return response.data[0]
+
+
 def get_snapshots_for_source(client: Client, source_id: str) -> list[dict]:
     response = (
         client.table("snapshots")
