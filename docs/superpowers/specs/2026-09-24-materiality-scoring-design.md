@@ -101,14 +101,20 @@ if __name__ == "__main__":
     ...  # load .env, build clients, call run(), print one line per result
 ```
 
-`get_active_sources`, already in `db.py` from sub-project 2, supplies each active source's `competitor_id` — `score.py` builds a `source_id -> competitor_id` map from it once per run rather than adding a per-signal source lookup.
+`db.get_source(client, source_id)` (not filtered by `is_active`) resolves each signal's source directly, rather than looking it up in an active-sources-only map — a source deactivated after generating a signal must not permanently prevent that signal from ever being scored.
 
 ## Error Handling
 
 - **No material signals pending, or all already have an insight**: `run()` returns an empty list; the CLI prints nothing and exits 0. Not an error.
 - **Scoring call fails** (rate limit, network error, refusal, malformed response): caught per-signal inside `run()`. Recorded as `status: "error"`; no `insights` or `insight_signals` row inserted for that signal. Other signals still get processed.
-- **`materiality_score` outside 1-10**: not validated in application code — the `insights.materiality_score` `check` constraint (from sub-project 1's schema) rejects the insert, which surfaces as a normal per-signal error through the same exception handling. No redundant application-level range check.
+- **`materiality_score` outside 1-10**: `score.run()` checks the range itself and fails fast with a message naming the actual value, before ever reaching the database — added after the final review found that relying on the `insights.materiality_score` `check` constraint alone meant an out-of-range score still paid for a full round-trip (API call + failed insert) on every retry. The `check` constraint (from sub-project 1's schema) remains as the ultimate guardrail regardless of what application code does; the JSON Schema sent to the model still has no `minimum`/`maximum` keywords (unconfirmed whether OpenAI's strict mode enforces numeric bounds).
 - **Missing `OPENAI_API_KEY`**: precondition failure for the whole run, not a per-signal error — raised immediately via `llm.get_client()`, before any signal is processed, matching `db.get_client()`'s `SUPABASE_URL`/`SUPABASE_SERVICE_ROLE_KEY` check and `classify.py`'s equivalent precondition from sub-project 3.
+
+## Known Limitations
+
+- **`insert_insight` and `insert_insight_signal` are two separate, non-atomic writes.** If the second fails after the first succeeds, `score.py` raises an error that names the orphaned insight's id (so it's findable), but does **not** delete it. That `insights` row survives with a real materiality score and rationale but no evidence link, and because the signal never gets an `insight_signals` row, the next run scores it again — producing a *second*, correctly-linked insight alongside the orphan. Cleaning up an orphan found this way is a manual `delete from insights where id = '<id>'`.
+- **`get_material_signals` and `get_signal_ids_with_insight` are both unbounded queries** (no pagination). PostgREST's server-side row cap would silently truncate either one with no error if the signal/insight volume ever grew past it — truncating the "already scored" set would re-score a signal (creating a duplicate `insights` row, now caught loudly by the `unique` constraint on `insight_signals.signal_id` added after the final review); truncating the "pending" set would silently skip signals outside the returned page, non-deterministically. Acceptable at this PoC's current scale (low single digits); would need real pagination before scaling further.
+- **No lock against concurrent runs.** Two overlapping `score.py` invocations can both read the same "not yet scored" state and both score the same signal, succeeding twice (the new `unique` constraint catches this case too — the second run's link insert fails loudly instead of silently duplicating). Fine for a manually-triggered PoC script; would need an advisory lock or a `SELECT ... FOR UPDATE`-style claim step before this runs on a schedule.
 
 ## Classification Prompt
 

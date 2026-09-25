@@ -51,6 +51,7 @@ def get_material_signals(client: Client) -> list[dict]:
         client.table("signals")
         .select("id, snapshot_id, theme, summary, diff_text")
         .eq("classification", "material")
+        .order("created_at")
         .execute()
     )
     return response.data
@@ -69,6 +70,21 @@ def get_snapshot(client: Client, snapshot_id: str) -> dict:
         .limit(1)
         .execute()
     )
+    if not response.data:
+        raise RuntimeError(f"snapshot {snapshot_id} not found")
+    return response.data[0]
+
+
+def get_source(client: Client, source_id: str) -> dict:
+    response = (
+        client.table("sources")
+        .select("id, url, competitor_id, source_type")
+        .eq("id", source_id)
+        .limit(1)
+        .execute()
+    )
+    if not response.data:
+        raise RuntimeError(f"source {source_id} not found")
     return response.data[0]
 
 
@@ -80,6 +96,8 @@ def get_competitor(client: Client, competitor_id: str) -> dict:
         .limit(1)
         .execute()
     )
+    if not response.data:
+        raise RuntimeError(f"competitor {competitor_id} not found")
     return response.data[0]
 
 

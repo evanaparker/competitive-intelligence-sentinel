@@ -58,6 +58,8 @@ PYTHONPATH=.deps python3 score.py
 
 For each `material` signal with no insight yet, scores it 1-10 for materiality (via `gpt-5.1`), assigns a confidence label (`high`/`medium`/`low`/`needs_review`), writes a citation-grounded rationale, and creates the `insights` row (`status` stays at its default `pending` — nothing here approves or publishes) plus the `insight_signals` link. Prints one line per scored signal: `SCORED <signal-id>: <score>`, or `ERROR <signal-id>: <message>`. Prints nothing and exits 0 if there's nothing pending. Needs `OPENAI_API_KEY` in `.env` (same key `classify.py` uses).
 
+`insight_signals.signal_id` is `unique` — each signal can only ever be linked to one insight. If a run creates an `insights` row but then fails to link it (a real but rare race), the error names the orphaned insight's id; it is not deleted automatically (see the spec's Known Limitations).
+
 ### Running tests
 
 ```bash

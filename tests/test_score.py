@@ -22,7 +22,6 @@ def _competitor(id_, name):
 def test_no_pending_signals_returns_empty_list(monkeypatch):
     monkeypatch.setattr(score, "get_material_signals", lambda c: [])
     monkeypatch.setattr(score, "get_signal_ids_with_insight", lambda c: set())
-    monkeypatch.setattr(score, "get_active_sources", lambda c: [])
 
     assert score.run(client=None) == []
 
@@ -30,7 +29,6 @@ def test_no_pending_signals_returns_empty_list(monkeypatch):
 def test_already_insighted_signal_is_skipped(monkeypatch):
     monkeypatch.setattr(score, "get_material_signals", lambda c: [_material_signal("sig1", "snap1")])
     monkeypatch.setattr(score, "get_signal_ids_with_insight", lambda c: {"sig1"})
-    monkeypatch.setattr(score, "get_active_sources", lambda c: [])
     called = []
     monkeypatch.setattr(score, "score_signal", lambda *a, **k: called.append(1))
 
@@ -43,20 +41,20 @@ def test_already_insighted_signal_is_skipped(monkeypatch):
 def test_scores_a_pending_signal(monkeypatch):
     monkeypatch.setattr(score, "get_material_signals", lambda c: [_material_signal("sig1", "snap1")])
     monkeypatch.setattr(score, "get_signal_ids_with_insight", lambda c: set())
-    monkeypatch.setattr(score, "get_active_sources", lambda c: [_source("src1", "comp1")])
     monkeypatch.setattr(score, "get_snapshot", lambda c, sid: _snapshot("snap1", "src1"))
+    monkeypatch.setattr(score, "get_source", lambda c, sid: _source("src1", "comp1"))
     monkeypatch.setattr(score, "get_competitor", lambda c, cid: _competitor("comp1", "Sonar"))
     monkeypatch.setattr(
         score,
         "score_signal",
-        lambda ctx, client=None: {"materiality_score": 8, "confidence": "high", "rationale": "x"},
+        lambda ctx, client=None: {"materiality_score": 8, "confidence": "high", "rationale": "Real cited evidence"},
     )
     inserted_insight = {}
     monkeypatch.setattr(
         score,
         "insert_insight",
         lambda c, competitor_id, materiality_score, confidence, rationale: inserted_insight.update(
-            competitor_id=competitor_id, materiality_score=materiality_score, confidence=confidence
+            competitor_id=competitor_id, materiality_score=materiality_score, confidence=confidence, rationale=rationale
         )
         or {"id": "insight1"},
     )
@@ -70,7 +68,12 @@ def test_scores_a_pending_signal(monkeypatch):
     results = score.run(client=None)
 
     assert results == [{"signal_id": "sig1", "status": "scored", "materiality_score": 8, "error": None}]
-    assert inserted_insight == {"competitor_id": "comp1", "materiality_score": 8, "confidence": "high"}
+    assert inserted_insight == {
+        "competitor_id": "comp1",
+        "materiality_score": 8,
+        "confidence": "high",
+        "rationale": "Real cited evidence",
+    }
     assert linked == {"insight_id": "insight1", "signal_id": "sig1"}
 
 
@@ -84,14 +87,12 @@ def test_scoring_error_does_not_stop_other_signals(monkeypatch):
         ],
     )
     monkeypatch.setattr(score, "get_signal_ids_with_insight", lambda c: set())
-    monkeypatch.setattr(
-        score, "get_active_sources", lambda c: [_source("src-bad", "comp1"), _source("src-good", "comp1")]
-    )
 
     def fake_get_snapshot(c, sid):
         return _snapshot(sid, "src-bad" if sid == "snap-bad" else "src-good")
 
     monkeypatch.setattr(score, "get_snapshot", fake_get_snapshot)
+    monkeypatch.setattr(score, "get_source", lambda c, sid: _source(sid, "comp1"))
     monkeypatch.setattr(score, "get_competitor", lambda c, cid: _competitor("comp1", "Sonar"))
 
     def fake_score_signal(ctx, client=None):
@@ -122,8 +123,8 @@ def test_scoring_error_does_not_stop_other_signals(monkeypatch):
 def test_error_message_is_never_empty(monkeypatch):
     monkeypatch.setattr(score, "get_material_signals", lambda c: [_material_signal("sig1", "snap1")])
     monkeypatch.setattr(score, "get_signal_ids_with_insight", lambda c: set())
-    monkeypatch.setattr(score, "get_active_sources", lambda c: [_source("src1", "comp1")])
     monkeypatch.setattr(score, "get_snapshot", lambda c, sid: _snapshot("snap1", "src1"))
+    monkeypatch.setattr(score, "get_source", lambda c, sid: _source("src1", "comp1"))
     monkeypatch.setattr(score, "get_competitor", lambda c, cid: _competitor("comp1", "Sonar"))
 
     def fake_score_signal(ctx, client=None):
@@ -141,21 +142,47 @@ def test_error_message_is_never_empty(monkeypatch):
 def test_unresolvable_source_fails_clearly(monkeypatch):
     monkeypatch.setattr(score, "get_material_signals", lambda c: [_material_signal("sig1", "snap1")])
     monkeypatch.setattr(score, "get_signal_ids_with_insight", lambda c: set())
-    monkeypatch.setattr(score, "get_active_sources", lambda c: [])  # source list doesn't include snap1's source
     monkeypatch.setattr(score, "get_snapshot", lambda c, sid: _snapshot("snap1", "src-missing"))
+
+    def fake_get_source(c, sid):
+        raise RuntimeError(f"source {sid} not found")
+
+    monkeypatch.setattr(score, "get_source", fake_get_source)
 
     results = score.run(client=None)
 
     assert results[0]["status"] == "error"
-    assert results[0]["error"] is not None
-    assert results[0]["error"] != ""
+    # Must actually identify what wasn't found, not just "some exception happened" —
+    # this is the exact bug class a prior sub-project's review caught: a test that
+    # asserts failure occurred without asserting the failure is legible.
+    assert "src-missing" in results[0]["error"]
+    assert "not found" in results[0]["error"]
+
+
+def test_out_of_range_score_fails_fast_before_the_database_round_trip(monkeypatch):
+    monkeypatch.setattr(score, "get_material_signals", lambda c: [_material_signal("sig1", "snap1")])
+    monkeypatch.setattr(score, "get_signal_ids_with_insight", lambda c: set())
+    monkeypatch.setattr(score, "get_snapshot", lambda c, sid: _snapshot("snap1", "src1"))
+    monkeypatch.setattr(score, "get_source", lambda c, sid: _source("src1", "comp1"))
+    monkeypatch.setattr(score, "get_competitor", lambda c, cid: _competitor("comp1", "Sonar"))
+    monkeypatch.setattr(
+        score, "score_signal", lambda ctx, client=None: {"materiality_score": 11, "confidence": "high", "rationale": "x"}
+    )
+    insert_calls = []
+    monkeypatch.setattr(score, "insert_insight", lambda c, *a, **k: insert_calls.append(1) or {"id": "should-not-exist"})
+
+    results = score.run(client=None)
+
+    assert results[0]["status"] == "error"
+    assert "11" in results[0]["error"]
+    assert insert_calls == []  # never reached the database — failed on the model's own output first
 
 
 def test_orphaned_insight_error_names_the_insight_id(monkeypatch):
     monkeypatch.setattr(score, "get_material_signals", lambda c: [_material_signal("sig1", "snap1")])
     monkeypatch.setattr(score, "get_signal_ids_with_insight", lambda c: set())
-    monkeypatch.setattr(score, "get_active_sources", lambda c: [_source("src1", "comp1")])
     monkeypatch.setattr(score, "get_snapshot", lambda c, sid: _snapshot("snap1", "src1"))
+    monkeypatch.setattr(score, "get_source", lambda c, sid: _source("src1", "comp1"))
     monkeypatch.setattr(score, "get_competitor", lambda c, cid: _competitor("comp1", "Sonar"))
     monkeypatch.setattr(
         score, "score_signal", lambda ctx, client=None: {"materiality_score": 8, "confidence": "high", "rationale": "x"}
