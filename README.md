@@ -42,6 +42,14 @@ insert into sources (competitor_id, source_type, url)
 values ('<id-from-above>', 'pricing_page', 'https://sonar.software/pricing');
 ```
 
+## Running classification
+
+```bash
+PYTHONPATH=.deps python3 classify.py
+```
+
+For each active source, classifies the diff between its two most recent snapshots as `cosmetic` or `material` (via GPT-5.4 Mini) and writes it to `signals` — skipping sources with fewer than 2 snapshots, an unchanged hash, or an already-classified newest snapshot. Prints one line per source: `CLASSIFIED <url>: <classification>`, `SKIPPED <url>`, or `ERROR <url>: <message>`. Needs `OPENAI_API_KEY` in `.env` alongside the Supabase credentials.
+
 ### Running tests
 
 ```bash
