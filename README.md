@@ -48,7 +48,7 @@ values ('<id-from-above>', 'pricing_page', 'https://sonar.software/pricing');
 PYTHONPATH=.deps python3 classify.py
 ```
 
-For each active source, classifies the diff between its two most recent snapshots as `cosmetic` or `material` (via GPT-5.4 Mini) and writes it to `signals` — skipping sources with fewer than 2 snapshots, an unchanged hash, or an already-classified newest snapshot. Prints one line per source: `CLASSIFIED <url>: <classification>`, `SKIPPED <url>`, or `ERROR <url>: <message>`. Needs `OPENAI_API_KEY` in `.env` alongside the Supabase credentials.
+For each active source, classifies the diff between its newest snapshot and the last snapshot that was already classified (not just the immediately-prior one — it walks back through any snapshots `ingest.py` inserted since, so a change is never lost just because this script didn't run between two `ingest.py` runs) as `cosmetic` or `material` (via GPT-5.4 Mini) and writes it to `signals`. Prints one line per source: `CLASSIFIED <url>: <classification>`, `SKIPPED <url> (<reason>)` where reason is `insufficient_history`, `already_classified`, or `unchanged`, or `ERROR <url>: <message>`. Exit code is `1` if any source errored, `0` otherwise. Needs `OPENAI_API_KEY` in `.env` alongside the Supabase credentials.
 
 ### Running tests
 
