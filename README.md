@@ -50,10 +50,18 @@ PYTHONPATH=.deps python3 classify.py
 
 For each active source, classifies the diff between its newest snapshot and the last snapshot that was already classified (not just the immediately-prior one — it walks back through any snapshots `ingest.py` inserted since, so a change is never lost just because this script didn't run between two `ingest.py` runs) as `cosmetic` or `material` (via GPT-5.4 Mini) and writes it to `signals`. Prints one line per source: `CLASSIFIED <url>: <classification>`, `SKIPPED <url> (<reason>)` where reason is `insufficient_history`, `already_classified`, or `unchanged`, or `ERROR <url>: <message>`. Exit code is `1` if any source errored, `0` otherwise. Needs `OPENAI_API_KEY` in `.env` alongside the Supabase credentials.
 
+## Running materiality scoring
+
+```bash
+PYTHONPATH=.deps python3 score.py
+```
+
+For each `material` signal with no insight yet, scores it 1-10 for materiality (via `gpt-5.1`), assigns a confidence label (`high`/`medium`/`low`/`needs_review`), writes a citation-grounded rationale, and creates the `insights` row (`status` stays at its default `pending` — nothing here approves or publishes) plus the `insight_signals` link. Prints one line per scored signal: `SCORED <signal-id>: <score>`, or `ERROR <signal-id>: <message>`. Prints nothing and exits 0 if there's nothing pending. Needs `OPENAI_API_KEY` in `.env` (same key `classify.py` uses).
+
 ### Running tests
 
 ```bash
 PYTHONPATH=.deps python3 -m pytest tests/ -v
 ```
 
-`hashing.py`, `extract.py`, and `fetch.py` are covered by local unit tests (no network or database). `ingest.py`'s orchestration logic (`tests/test_ingest.py`) is covered with the DB/network calls monkeypatched. `db.py`'s three data-access functions have no local test — they're verified by actually running against the live Supabase project (see the implementation plan's Task 5 for how).
+Pure-logic modules (`hashing.py`, `extract.py`, `fetch.py`, `diffing.py`, `llm.py`, `classifier.py`, `scorer.py`) and the orchestrators' own decision logic (`ingest.py`, `classify.py`, `score.py`, each in their own `tests/test_*.py`) are covered by local unit tests with the DB/LLM calls monkeypatched — no network or database needed to run the suite. `db.py`'s data-access functions (other than `get_client`) have no local test — they're verified by actually running against the live Supabase project as part of each sub-project's implementation plan.
