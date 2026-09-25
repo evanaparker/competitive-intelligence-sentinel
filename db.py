@@ -44,3 +44,52 @@ def insert_snapshot(client: Client, source_id: str, content: str, content_hash: 
         .execute()
     )
     return response.data[0]
+
+
+def get_two_latest_snapshots(client: Client, source_id: str) -> list[dict]:
+    response = (
+        client.table("snapshots")
+        .select("id, content, content_hash, fetched_at")
+        .eq("source_id", source_id)
+        .order("fetched_at", desc=True)
+        .limit(2)
+        .execute()
+    )
+    return response.data
+
+
+def has_signal_for_snapshot(client: Client, snapshot_id: str) -> bool:
+    response = (
+        client.table("signals")
+        .select("id")
+        .eq("snapshot_id", snapshot_id)
+        .limit(1)
+        .execute()
+    )
+    return len(response.data) > 0
+
+
+def insert_signal(
+    client: Client,
+    snapshot_id: str,
+    prior_snapshot_id: str,
+    diff_text: str,
+    classification: str,
+    theme: str,
+    summary: str,
+) -> dict:
+    response = (
+        client.table("signals")
+        .insert(
+            {
+                "snapshot_id": snapshot_id,
+                "prior_snapshot_id": prior_snapshot_id,
+                "diff_text": diff_text,
+                "classification": classification,
+                "theme": theme,
+                "summary": summary,
+            }
+        )
+        .execute()
+    )
+    return response.data[0]
