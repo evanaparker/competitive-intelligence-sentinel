@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from classifier import classify_diff, get_client
+from classifier import classify_diff
 
 
 class _FakeMessage:
@@ -69,25 +69,6 @@ def test_classify_diff_includes_diff_text_in_prompt():
     kwargs = fake_client.chat.completions.last_kwargs
     user_message = kwargs["messages"][-1]["content"]
     assert "[-old-] {+new+}" in user_message
-
-
-def test_get_client_raises_when_key_missing(monkeypatch):
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    with pytest.raises(RuntimeError, match="OPENAI_API_KEY"):
-        get_client()
-
-
-def test_get_client_returns_client_when_key_set(monkeypatch):
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-fake-key")
-    assert get_client() is not None
-
-
-def test_get_client_sets_a_bounded_timeout(monkeypatch):
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-fake-key")
-    client = get_client()
-    # SDK default read timeout is 600s; an unattended run must not be able
-    # to stall that long on one source.
-    assert client.timeout == 15.0
 
 
 class _RefusalMessage:

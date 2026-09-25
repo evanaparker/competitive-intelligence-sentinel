@@ -1,7 +1,8 @@
 import json
-import os
 
 from openai import OpenAI
+
+from llm import get_client
 
 CLASSIFICATION_SCHEMA = {
     "type": "object",
@@ -27,13 +28,6 @@ SYSTEM_PROMPT = (
     'Give a short theme (e.g. "pricing", "features", "positioning", '
     '"hiring", "other") and a one-sentence summary in plain language.'
 )
-
-
-def get_client() -> OpenAI:
-    key = os.environ.get("OPENAI_API_KEY")
-    if not key:
-        raise RuntimeError("OPENAI_API_KEY must be set (see .env.example)")
-    return OpenAI(api_key=key, timeout=15.0)
 
 
 def classify_diff(diff_text: str, source_type: str, client: OpenAI | None = None) -> dict:
