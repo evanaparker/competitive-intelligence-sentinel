@@ -131,10 +131,6 @@ Request parameters: `model="claude-haiku-4-5"`, `max_tokens=512`, no `thinking` 
 
 New: `anthropic` (official Python SDK). Added to the existing `requirements.txt` from sub-project 2 alongside `httpx`, `beautifulsoup4`, `supabase`, `python-dotenv`, `pytest`.
 
-## Environment Note
-
-`.env` moves to the repo root (`/home/sdn/Desktop/competitive-intelligence-sentinel/.env`) rather than living inside a sub-project's worktree, so it survives worktree cleanup between sub-projects (`python-dotenv`'s `load_dotenv()` searches upward through parent directories and finds it from any worktree). It now holds `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, and `ANTHROPIC_API_KEY`.
-
 ## Testing
 
 - `diffing.py`: unit tests with `pytest` — confirms the wdiff-style output for insertions, deletions, and replacements; confirms no output for identical input.
