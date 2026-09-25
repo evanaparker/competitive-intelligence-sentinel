@@ -6,7 +6,7 @@ Scope: Sub-project 3 of the Competitive Intelligence Sentinel PoC — classifies
 
 ## Context
 
-This builds on sub-project 1's data model ([2026-09-23-data-model-design.md](2026-09-23-data-model-design.md)) and sub-project 2's ingestion pipeline ([2026-09-24-ingestion-change-detection-design.md](2026-09-24-ingestion-change-detection-design.md)), which already fetches Sonar's pricing page and stores snapshots with a hash-based change signal. This sub-project is the first to call an LLM: it takes the two most recent snapshots of a source, computes the diff between them, asks Claude Haiku to classify that diff as `cosmetic` or `material`, and writes the result to `signals`. It does not touch `insights`, `insight_signals`, or `feedback` — materiality scoring and rationale generation (PRD stage 5) is a later sub-project.
+This builds on sub-project 1's data model ([2026-09-23-data-model-design.md](2026-09-23-data-model-design.md)) and sub-project 2's ingestion pipeline ([2026-09-24-ingestion-change-detection-design.md](2026-09-24-ingestion-change-detection-design.md)), which already fetches Test Competitor's pricing page and stores snapshots with a hash-based change signal. This sub-project is the first to call an LLM: it takes the two most recent snapshots of a source, computes the diff between them, asks Claude Haiku to classify that diff as `cosmetic` or `material`, and writes the result to `signals`. It does not touch `insights`, `insight_signals`, or `feedback` — materiality scoring and rationale generation (PRD stage 5) is a later sub-project.
 
 ## Goals
 
@@ -19,9 +19,9 @@ This builds on sub-project 1's data model ([2026-09-23-data-model-design.md](202
 
 - Materiality scoring, rationale generation, or anything writing to `insights` — PRD stage 5, a later sub-project.
 - Cross-source correlation or `insight_signals` — PRD stage 4, a later sub-project.
-- Backfilling historical snapshot pairs that predate this sub-project — only the two most recent snapshots per source are considered on each run. Sonar already has several snapshot pairs in Supabase from sub-project 2's testing with no signal between them; those are not retroactively classified.
+- Backfilling historical snapshot pairs that predate this sub-project — only the two most recent snapshots per source are considered on each run. Test Competitor already has several snapshot pairs in Supabase from sub-project 2's testing with no signal between them; those are not retroactively classified.
 - Confidence scoring on `signals` — the `signals` table has no confidence column (only `insights.confidence` does, in a later sub-project); this sub-project only produces the `cosmetic`/`material` classification.
-- Chunking or summarizing very large diffs — Sonar's extracted text is a few KB; not needed at this scale.
+- Chunking or summarizing very large diffs — Test Competitor's extracted text is a few KB; not needed at this scale.
 - Scheduling (GitHub Actions cron) — runs as a local script for now, consistent with sub-project 2.
 
 ## Architecture
@@ -135,4 +135,4 @@ New: `anthropic` (official Python SDK). Added to the existing `requirements.txt`
 
 - `diffing.py`: unit tests with `pytest` — confirms the wdiff-style output for insertions, deletions, and replacements; confirms no output for identical input.
 - `classifier.py`: unit tests using a fake/mocked `anthropic.Anthropic` client (dependency-injected, same pattern as `fetch.py`'s `httpx.MockTransport` tests) — no real API calls in the test suite. Live-verified separately (see below) against the real API.
-- `db.py`'s three new functions and `classify.py`: no local test harness for the live Supabase/Anthropic dependency (consistent with sub-project 2); verified by running against the real Supabase project and a real Claude Haiku call. Since Sonar's current snapshot history has no pending (unclassified, hash-differing) pair at the end of sub-project 2, live verification seeds one synthetic snapshot with deliberately different content (mirroring sub-project 2's Task 6 technique) to exercise the full path — including one case engineered to classify as `material` (a price change) and one as `cosmetic` (a wording-only change) — against the real model.
+- `db.py`'s three new functions and `classify.py`: no local test harness for the live Supabase/Anthropic dependency (consistent with sub-project 2); verified by running against the real Supabase project and a real Claude Haiku call. Since Test Competitor's current snapshot history has no pending (unclassified, hash-differing) pair at the end of sub-project 2, live verification seeds one synthetic snapshot with deliberately different content (mirroring sub-project 2's Task 6 technique) to exercise the full path — including one case engineered to classify as `material` (a price change) and one as `cosmetic` (a wording-only change) — against the real model.

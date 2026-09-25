@@ -11,7 +11,7 @@ This builds directly on the data model from sub-project 1 ([2026-09-23-data-mode
 ## Goals
 
 - Fetch one real, live competitor source and store what changed, end to end, provably working — not a stub.
-- Seed the one competitor/source this PoC increment tracks: **Sonar** (`https://sonar.software/pricing`, `source_type = pricing_page`) — confirmed to be server-rendered (pricing figures present in the raw HTML with no JavaScript execution needed), so a plain HTTP GET is sufficient; no headless browser required.
+- Seed the one competitor/source this PoC increment tracks: **Test Competitor** (`https://test-competitor.example/pricing`, `source_type = pricing_page`) — confirmed to be server-rendered (pricing figures present in the raw HTML with no JavaScript execution needed), so a plain HTTP GET is sufficient; no headless browser required.
 - Every successful fetch inserts a `snapshots` row, whether or not the content changed (per the data model spec, a repeated `content_hash` is expected and is the "still being watched, nothing new" signal, not an error).
 - One failing source must not stop the others from being checked (forward-looking: this PoC will eventually track more than one source).
 - Small, independently testable units: pure functions get real unit tests; the two units that must talk to the network or the database (`fetch`, `db`) are the only ones that don't.
@@ -19,7 +19,7 @@ This builds directly on the data model from sub-project 1 ([2026-09-23-data-mode
 ## Non-goals (explicitly out of scope for this sub-project)
 
 - Signal classification, diffing into `diff_text`, or anything writing to `signals` — next sub-project.
-- A general "add a competitor/source" UI or CLI — the one Sonar source is seeded directly via SQL, the same way sub-project 1 seeded test fixtures.
+- A general "add a competitor/source" UI or CLI — the one Test Competitor source is seeded directly via SQL, the same way sub-project 1 seeded test fixtures.
 - Scheduling (GitHub Actions cron) — this runs as a local script for now, per this session's decision to prove the logic before wiring automation around it.
 - Headless-browser fetching (Playwright) — not needed for this source; if a future source turns out to be client-rendered, that's a new `fetch` implementation to add then, not now.
 - Retry/backoff logic on fetch failure — a failed fetch is recorded and skipped this run; it gets picked up again on the next manual run.
@@ -27,7 +27,7 @@ This builds directly on the data model from sub-project 1 ([2026-09-23-data-mode
 ## Architecture
 
 ```
-sources (Supabase, seeded with 1 row: Sonar / pricing_page)
+sources (Supabase, seeded with 1 row: Test Competitor / pricing_page)
    │
    ▼
 fetch.py     — GET the source URL (httpx, 15s timeout), return raw HTML
@@ -110,8 +110,8 @@ if __name__ == "__main__":
 Before `ingest.py` can do anything, `sources` needs the one row it will check:
 
 ```sql
-insert into competitors (name, website) values ('Sonar', 'https://sonar.software') returning id;
-insert into sources (competitor_id, source_type, url) values ('<id-from-above>', 'pricing_page', 'https://sonar.software/pricing');
+insert into competitors (name, website) values ('Test Competitor', 'https://test-competitor.example') returning id;
+insert into sources (competitor_id, source_type, url) values ('<id-from-above>', 'pricing_page', 'https://test-competitor.example/pricing');
 ```
 
 This is a one-time setup step (applied directly via the Supabase MCP tools, the same way sub-project 1 seeded its test fixtures), not a feature of the ingestion code itself.
@@ -125,4 +125,4 @@ New: `httpx` (fetch), `beautifulsoup4` (extraction), `supabase` (the official Py
 - `extract.py`: unit tests with fixed HTML fixtures — confirms script/style stripped, whitespace collapsed, plain text returned.
 - `hashing.py`: unit tests — same input always produces the same hash; different input produces a different hash.
 - `fetch.py`: unit tests using `httpx.MockTransport` — no real network calls; covers a 200 response and a non-2xx response (expect `HTTPStatusError`).
-- `db.py` and `ingest.py`: no local test harness exists in this repo for a live Postgres/Supabase dependency (consistent with sub-project 1); verified by running against the real, already-live Supabase project (`wbjptxjrujyzmsjldwwo`) as part of the implementation plan's own task verification — first run against the freshly-seeded Sonar source (expect `changed: True`, one new snapshot), second run immediately after (expect `changed: False`, a second snapshot with the same hash).
+- `db.py` and `ingest.py`: no local test harness exists in this repo for a live Postgres/Supabase dependency (consistent with sub-project 1); verified by running against the real, already-live Supabase project (`wbjptxjrujyzmsjldwwo`) as part of the implementation plan's own task verification — first run against the freshly-seeded Test Competitor source (expect `changed: True`, one new snapshot), second run immediately after (expect `changed: False`, a second snapshot with the same hash).
