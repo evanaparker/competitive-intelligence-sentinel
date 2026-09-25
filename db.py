@@ -46,13 +46,12 @@ def insert_snapshot(client: Client, source_id: str, content: str, content_hash: 
     return response.data[0]
 
 
-def get_two_latest_snapshots(client: Client, source_id: str) -> list[dict]:
+def get_snapshots_for_source(client: Client, source_id: str) -> list[dict]:
     response = (
         client.table("snapshots")
         .select("id, content, content_hash, fetched_at")
         .eq("source_id", source_id)
         .order("fetched_at", desc=True)
-        .limit(2)
         .execute()
     )
     return response.data

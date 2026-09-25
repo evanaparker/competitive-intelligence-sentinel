@@ -33,7 +33,7 @@ def get_client() -> OpenAI:
     key = os.environ.get("OPENAI_API_KEY")
     if not key:
         raise RuntimeError("OPENAI_API_KEY must be set (see .env.example)")
-    return OpenAI(api_key=key)
+    return OpenAI(api_key=key, timeout=15.0)
 
 
 def classify_diff(diff_text: str, source_type: str, client: OpenAI | None = None) -> dict:
@@ -54,4 +54,9 @@ def classify_diff(diff_text: str, source_type: str, client: OpenAI | None = None
             },
         },
     )
-    return json.loads(response.choices[0].message.content)
+    message = response.choices[0].message
+    if message.content is None:
+        if message.refusal:
+            raise RuntimeError(f"model refused to classify: {message.refusal}")
+        raise RuntimeError("model returned no content")
+    return json.loads(message.content)

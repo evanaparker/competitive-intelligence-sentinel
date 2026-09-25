@@ -80,3 +80,73 @@ def test_get_client_raises_when_key_missing(monkeypatch):
 def test_get_client_returns_client_when_key_set(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test-fake-key")
     assert get_client() is not None
+
+
+def test_get_client_sets_a_bounded_timeout(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-fake-key")
+    client = get_client()
+    # SDK default read timeout is 600s; an unattended run must not be able
+    # to stall that long on one source.
+    assert client.timeout == 15.0
+
+
+class _RefusalMessage:
+    content = None
+    refusal = "cannot classify this content"
+
+
+class _RefusalChoice:
+    message = _RefusalMessage()
+
+
+class _RefusalResponse:
+    choices = [_RefusalChoice()]
+
+
+class _RefusalCompletions:
+    def create(self, **kwargs):
+        return _RefusalResponse()
+
+
+class _RefusalChat:
+    completions = _RefusalCompletions()
+
+
+class _RefusalClient:
+    chat = _RefusalChat()
+
+
+def test_classify_diff_raises_clear_error_on_refusal():
+    with pytest.raises(RuntimeError, match="refused"):
+        classify_diff("some diff", "pricing_page", client=_RefusalClient())
+
+
+class _NoContentNoRefusalMessage:
+    content = None
+    refusal = None
+
+
+class _NoContentChoice:
+    message = _NoContentNoRefusalMessage()
+
+
+class _NoContentResponse:
+    choices = [_NoContentChoice()]
+
+
+class _NoContentCompletions:
+    def create(self, **kwargs):
+        return _NoContentResponse()
+
+
+class _NoContentChat:
+    completions = _NoContentCompletions()
+
+
+class _NoContentClient:
+    chat = _NoContentChat()
+
+
+def test_classify_diff_raises_clear_error_when_content_missing_without_refusal():
+    with pytest.raises(RuntimeError, match="no content"):
+        classify_diff("some diff", "pricing_page", client=_NoContentClient())
