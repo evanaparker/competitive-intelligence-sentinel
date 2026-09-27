@@ -60,6 +60,18 @@ For each `material` signal with no insight yet, scores it 1-10 for materiality (
 
 `insight_signals.signal_id` is `unique` — each signal can only ever be linked to one insight. If a run creates an `insights` row but then fails to link it (a real but rare race), the error names the orphaned insight's id; it is not deleted automatically (see the spec's Known Limitations).
 
+## Running the review app
+
+```bash
+PYTHONPATH=.deps python3 -m streamlit run review.py --server.port 8501 --server.headless true --global.developmentMode false
+```
+
+Shows every `pending` insight (highest materiality first) with its competitor, score, confidence, rationale, and the raw evidence (the underlying signal's diff) it's based on. Approve or Reject moves the insight out of the queue; an optional feedback rating (`useful`/`not_useful`/`incorrect`) and comment can be left alongside either decision — feedback is not required and a failure saving it is reported separately from the approve/reject decision itself, which still stands.
+
+`--global.developmentMode false` is required with the `--target=.deps` install described above: without a `site-packages` directory in its module path, Streamlit assumes it's running from its own source checkout and switches into a mode that refuses a fixed `--server.port`. If your environment installs Streamlit normally (e.g. into a venv), this flag is unnecessary but harmless.
+
+Not deployed anywhere yet — runs locally, same as every other script in this repo so far.
+
 ### Running tests
 
 ```bash
