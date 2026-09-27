@@ -50,13 +50,23 @@ PYTHONPATH=.deps python3 classify.py
 
 For each active source, classifies the diff between its newest snapshot and the last snapshot that was already classified (not just the immediately-prior one — it walks back through any snapshots `ingest.py` inserted since, so a change is never lost just because this script didn't run between two `ingest.py` runs) as `cosmetic` or `material` (via GPT-5.4 Mini) and writes it to `signals`. Prints one line per source: `CLASSIFIED <url>: <classification>`, `SKIPPED <url> (<reason>)` where reason is `insufficient_history`, `already_classified`, or `unchanged`, or `ERROR <url>: <message>`. Exit code is `1` if any source errored, `0` otherwise. Needs `OPENAI_API_KEY` in `.env` alongside the Supabase credentials.
 
+## Running correlation
+
+```bash
+PYTHONPATH=.deps python3 correlate.py
+```
+
+For each competitor, groups `material` signals with no insight yet into candidate clusters using a fixed 7-day time window from the earliest ungrouped signal, then — for any cluster of 2+ — asks `gpt-5.4-mini` a binary question: do these signals describe the same underlying business story? If yes, they share a `correlation_group_id` so `score.py` creates one insight for the group instead of one per signal. If no, or if the cluster only had one signal to begin with, each signal is marked decided with its own id (so it is never reconsidered) and gets scored on its own. Prints one line per cluster: `GROUPED <competitor>: N signals (<group_id>)`, `UNGROUPED <competitor>: N signals (not correlated)`, `SINGLETON <competitor>: 1 signal`, or `ERROR <competitor>: <message>`. Exit code is `1` if any cluster errored, `0` otherwise. Needs `OPENAI_API_KEY` in `.env` (same key `classify.py`/`score.py` use).
+
+Run this before `score.py` — it's what lets `score.py` bundle related signals into one insight instead of scoring each in isolation.
+
 ## Running materiality scoring
 
 ```bash
 PYTHONPATH=.deps python3 score.py
 ```
 
-For each `material` signal with no insight yet, scores it 1-10 for materiality (via `gpt-5.1`), assigns a confidence label (`high`/`medium`/`low`/`needs_review`), writes a citation-grounded rationale, and creates the `insights` row (`status` stays at its default `pending` — nothing here approves or publishes) plus the `insight_signals` link. Prints one line per scored signal: `SCORED <signal-id>: <score>`, or `ERROR <signal-id>: <message>`. Prints nothing and exits 0 if there's nothing pending. Needs `OPENAI_API_KEY` in `.env` (same key `classify.py` uses).
+Groups `material` signals with no insight yet by `correlation_group_id` (set by `correlate.py` — a signal with no group of its own, e.g. because `correlate.py` was never run, is scored alone), and for each group scores it 1-10 for materiality (via `gpt-5.1`), assigns a confidence label (`high`/`medium`/`low`/`needs_review`), writes a citation-grounded rationale covering every signal in the group, and creates one `insights` row (`status` stays at its default `pending` — nothing here approves or publishes) linked to every signal in the group via `insight_signals`. Prints one line per scored signal: `SCORED <signal-id>: <score>`, or `ERROR <signal-id>: <message>`. Prints nothing and exits 0 if there's nothing pending. Needs `OPENAI_API_KEY` in `.env` (same key `classify.py` uses).
 
 `insight_signals.signal_id` is `unique` — each signal can only ever be linked to one insight. If a run creates an `insights` row but then fails to link it (a real but rare race), the error names the orphaned insight's id; it is not deleted automatically (see the spec's Known Limitations).
 
