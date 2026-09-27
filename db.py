@@ -50,7 +50,7 @@ def insert_snapshot(client: Client, source_id: str, content: str, content_hash: 
 def get_material_signals(client: Client) -> list[dict]:
     response = (
         client.table("signals")
-        .select("id, snapshot_id, theme, summary, diff_text")
+        .select("id, snapshot_id, theme, summary, diff_text, created_at, correlation_group_id")
         .eq("classification", "material")
         .order("created_at")
         .execute()
@@ -61,6 +61,10 @@ def get_material_signals(client: Client) -> list[dict]:
 def get_signal_ids_with_insight(client: Client) -> set[str]:
     response = client.table("insight_signals").select("signal_id").execute()
     return {row["signal_id"] for row in response.data}
+
+
+def assign_correlation_group(client: Client, signal_ids: list[str], group_id: str) -> None:
+    client.table("signals").update({"correlation_group_id": group_id}).in_("id", signal_ids).execute()
 
 
 def get_snapshot(client: Client, snapshot_id: str) -> dict:
