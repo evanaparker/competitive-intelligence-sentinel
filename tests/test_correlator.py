@@ -132,7 +132,7 @@ def test_judge_correlation_sends_correct_model_and_strict_schema():
     fake_client = _FakeOpenAIClient({"correlated": True})
     judge_correlation([_cluster_signal(), _cluster_signal()], client=fake_client)
     kwargs = fake_client.chat.completions.last_kwargs
-    assert kwargs["model"] == "gpt-5.4-mini"
+    assert kwargs["model"] == "classify-mini"
     assert kwargs["response_format"]["json_schema"]["strict"] is True
     schema = kwargs["response_format"]["json_schema"]["schema"]
     assert schema["required"] == ["correlated"]

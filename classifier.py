@@ -34,7 +34,7 @@ def classify_diff(diff_text: str, source_type: str, client: OpenAI | None = None
     if client is None:
         client = get_client()
     response = client.chat.completions.create(
-        model="gpt-5.4-mini",
+        model="classify-mini",
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": f"Source type: {source_type}\n\nDiff:\n{diff_text}"},

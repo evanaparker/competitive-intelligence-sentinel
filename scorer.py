@@ -58,7 +58,7 @@ def score_signal(signals: list[dict], client: OpenAI | None = None) -> dict:
         )
     user_content = f"Competitor: {signals[0]['competitor_name']}\n\n" + "\n\n".join(blocks)
     response = client.chat.completions.create(
-        model="gpt-5.1",
+        model="score-main",
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_content},

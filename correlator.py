@@ -68,7 +68,7 @@ def judge_correlation(cluster: list[dict], client: OpenAI | None = None) -> bool
         )
     user_content = f"Competitor: {cluster[0]['competitor_name']}\n\n" + "\n\n".join(blocks)
     response = client.chat.completions.create(
-        model="gpt-5.4-mini",
+        model="classify-mini",
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_content},

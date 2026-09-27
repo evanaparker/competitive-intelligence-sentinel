@@ -54,7 +54,7 @@ def test_classify_diff_sends_correct_model_and_strict_schema():
     )
     classify_diff("some diff", "pricing_page", client=fake_client)
     kwargs = fake_client.chat.completions.last_kwargs
-    assert kwargs["model"] == "gpt-5.4-mini"
+    assert kwargs["model"] == "classify-mini"
     assert kwargs["response_format"]["json_schema"]["strict"] is True
     schema = kwargs["response_format"]["json_schema"]["schema"]
     assert schema["required"] == ["classification", "theme", "summary"]

@@ -61,7 +61,7 @@ def test_score_signal_sends_correct_model_and_strict_schema():
     fake_client = _FakeOpenAIClient({"materiality_score": 3, "confidence": "medium", "rationale": "x"})
     score_signal([SAMPLE_SIGNAL], client=fake_client)
     kwargs = fake_client.chat.completions.last_kwargs
-    assert kwargs["model"] == "gpt-5.1"
+    assert kwargs["model"] == "score-main"
     assert kwargs["response_format"]["json_schema"]["strict"] is True
     schema = kwargs["response_format"]["json_schema"]["schema"]
     assert schema["required"] == ["materiality_score", "confidence", "rationale"]
