@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "review-app",
+      "runtimeExecutable": "bash",
+      "runtimeArgs": ["run_review_app.sh"],
+      "port": 8501
+    }
+  ]
+}
