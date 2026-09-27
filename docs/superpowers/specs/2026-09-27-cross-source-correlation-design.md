@@ -40,19 +40,24 @@ group by competitor_id
    ▼
 correlator.cluster_by_time_window(signals, window_days=7)  → list[list[signal]]
    │
-   ├─ cluster of 1  → leave correlation_group_id NULL (scored as a singleton later)
+   ├─ cluster of 1  → db: assign correlation_group_id = the signal's own id (self-referential —
+   │                     marks it "decided," scored as a singleton later)
    │
    └─ cluster of 2+ → correlator.judge_correlation(cluster) → gpt-5.4-mini, JSON Schema-constrained
         │  {"correlated": bool}
-        ├─ true  → db: assign a new shared correlation_group_id to every signal in the cluster
-        └─ false → leave correlation_group_id NULL on all of them
+        ├─ true  → db: assign one new shared correlation_group_id to every signal in the cluster
+        └─ false → db: assign correlation_group_id = its own id to EACH signal individually
+                     (same self-referential marker as a singleton — decided, never regrouped)
 
 --- (score.py, modified) ---
 
 signals (classification = 'material', no insight yet)
    │
    ▼
-group by correlation_group_id (NULL → the signal's own id, i.e. a singleton group)
+group by correlation_group_id (NULL only happens if correlate.py never ran on this
+signal — falls back to the signal's own id, i.e. its own singleton group; every
+signal correlate.py has actually decided already carries a non-null value, shared
+or self-referential)
    │
    ▼
 scorer.score_signal(list_of_signal_contexts)  → gpt-5.1, JSON Schema-constrained output
@@ -97,12 +102,23 @@ def run(client, openai_client=None) -> list[dict]:
     (same lookup chain score.py already uses), groups by competitor_id
     (stable order, preserving get_material_signals' created_at ordering),
     and for each competitor's signals calls cluster_by_time_window. For each cluster of size 1:
-    records a "singleton" result, no DB write. For each cluster of size
-    2+: calls judge_correlation; on True, calls
-    db.assign_correlation_group for all signal ids in the cluster with a
-    freshly generated uuid; on False, records "ungrouped", no DB write.
-    Catches any exception per-cluster (status "error"; no DB write for
-    that cluster) without stopping other clusters or other competitors.
+    calls db.assign_correlation_group([signal_id], signal_id) — self-
+    referential, marks it decided — and records a "singleton" result. For
+    each cluster of size 2+: calls judge_correlation; on True, calls
+    db.assign_correlation_group(signal_ids, freshly generated uuid) once
+    for the whole cluster and records "grouped"; on False, calls
+    db.assign_correlation_group([signal_id], signal_id) separately for
+    EACH signal in the cluster (each gets its own id, not a shared one —
+    they are marked individually decided, not grouped) and records
+    "ungrouped". This self-referential marker is what makes rejection
+    idempotent: a later run's query (no insight yet AND
+    correlation_group_id IS NULL) never sees a signal again once it has
+    any of these three outcomes, only if correlate.py has never
+    processed it at all (never run, or the previous run errored on it —
+    see Error Handling). Catches any exception per-cluster (status
+    "error"; no DB write for that cluster, so those signals stay NULL and
+    are retried on the next run) without stopping other clusters or other
+    competitors.
     Returns [{"competitor_id": str, "signal_ids": list[str], "status":
     "grouped"|"ungrouped"|"singleton"|"error", "group_id": str | None,
     "error": str | None}, ...].
@@ -166,6 +182,7 @@ def run(client, openai_client=None) -> list[dict]:
 - **A cluster's `judge_correlation` call fails** (rate limit, network error, refusal, malformed response): caught per-cluster inside `correlate.py`'s `run()`. Recorded as `status: "error"`; no `correlation_group_id` written for that cluster's signals. Other clusters and other competitors still get processed. Those signals remain ungrouped and are picked up by `score.py` as singletons — degradation, not a stall.
 - **Missing `OPENAI_API_KEY`**: precondition failure for the whole run, raised immediately via `llm.get_client()`, before any competitor is processed — same as `classify.py`/`score.py`.
 - **`score.py`'s per-group scoring failure**: caught per-group, same as sub-project 4's per-signal handling, just scoped to a group. `materiality_score` out-of-range check (sub-project 4's final-review fix) is unchanged — still checked before the database round-trip.
+- **A rejected cluster (`judge_correlation` returns `False`) is a decision, not a failure** — it must be distinguished from an API error so idempotency (see Goals) actually holds. `correlation_group_id` therefore ends up NULL in exactly one situation: `correlate.py` has never successfully evaluated that signal (never run at all, or a prior run's `judge_correlation`/`assign_correlation_group` call errored on it). Every signal `correlate.py` has successfully decided — whether grouped, singleton, or explicitly rejected — carries a non-null `correlation_group_id` (shared for a confirmed group, its own id otherwise), so a later run's query never reconsiders it. Getting this wrong (leaving rejected signals NULL) would silently re-run the same LLM judgment, and pay for it, on every future `correlate.py` invocation until one of the signals got scored.
 - **Partial `insert_insight_signal` failure within a group**: see Module Interfaces above. The remaining unlinked signals in that group keep their `correlation_group_id`, so the next `score.py` run naturally retries them as a smaller group — no special-case recovery code needed.
 
 ## Known Limitations
@@ -216,7 +233,7 @@ None new — reuses `openai` (already a dependency since sub-project 3) and the 
 ## Testing
 
 - `correlator.py`: unit tests for `cluster_by_time_window` (pure function, no mocking needed — exact partition boundaries, including a signal exactly `window_days` away, and an empty input) and for `judge_correlation` using a fake/mocked `OpenAI` client (dependency-injected, same pattern as `scorer.py`'s tests). No real API calls in the test suite.
-- `correlate.py`: unit tests with the DB/LLM calls monkeypatched, following `score.py`'s test pattern — including per-cluster error isolation (one cluster's `judge_correlation` failure doesn't stop another competitor's clusters from being processed) and idempotency (`run()`'s own filtering drops any signal with a non-null `correlation_group_id` before grouping by competitor, so a previously-decided signal is never reclustered).
+- `correlate.py`: unit tests with the DB/LLM calls monkeypatched, following `score.py`'s test pattern — including per-cluster error isolation (one cluster's `judge_correlation` failure doesn't stop another competitor's clusters from being processed), a rejected cluster (`judge_correlation` returns `False`) getting each signal assigned its own id rather than being left NULL, and idempotency (`run()`'s own filtering drops any signal with a non-null `correlation_group_id` before grouping by competitor, so a previously-decided signal — grouped, singleton, or explicitly rejected — is never reclustered or re-judged).
 - `scorer.py`: existing tests (sub-project 4) updated for the new list-based `score_signal` signature — single-signal case (list of 1) and multi-signal case (list of 2+, asserting the prompt includes every signal's evidence).
-- `score.py`: existing tests (sub-project 4) updated for grouping by `correlation_group_id`, including a null-group-id signal being scored as its own singleton group, a multi-signal group producing one insight linked to all its signals, and the partial-link-failure error message naming which signals succeeded vs failed.
+- `score.py`: existing tests (sub-project 4) updated for grouping by `correlation_group_id`, including two *different* signals that both happen to have a null `correlation_group_id` being scored as two independent singleton insights (never merged just because they share the same "ungrouped" state — the sharpest bug risk in this grouping logic), a multi-signal group producing one insight linked to all its signals, and the partial-link-failure error message naming which signals succeeded vs failed.
 - `db.py`'s new/modified functions: no local test harness for the live Supabase dependency (consistent with sub-projects 2-5); verified by running against the real project. Since no signal in the live database has ever had more than one candidate correlation partner (only one source is tracked), live verification seeds 2-3 synthetic signals for the same competitor — some within the 7-day window, at least one outside it — the implementation plan defines exactly how, following the same seed-then-clean-up discipline every prior sub-project used.
