@@ -1,4 +1,5 @@
 import json
+from datetime import datetime, timedelta, timezone
 
 from correlator import cluster_by_time_window
 
@@ -159,3 +160,22 @@ def test_judge_correlation_raises_clear_error_on_refusal():
     )
     with pytest.raises(RuntimeError, match="refused"):
         judge_correlation([_cluster_signal(), _cluster_signal()], client=fake_client)
+
+
+from correlator import window_has_closed
+
+
+def test_window_has_closed_false_for_a_recent_signal():
+    recent = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    assert window_has_closed({"created_at": recent}) is False
+
+
+def test_window_has_closed_true_for_an_old_signal():
+    old = (datetime.now(timezone.utc) - timedelta(days=10)).isoformat()
+    assert window_has_closed({"created_at": old}) is True
+
+
+def test_window_has_closed_respects_custom_window_days():
+    eight_days_ago = (datetime.now(timezone.utc) - timedelta(days=8)).isoformat()
+    assert window_has_closed({"created_at": eight_days_ago}, window_days=7) is True
+    assert window_has_closed({"created_at": eight_days_ago}, window_days=14) is False

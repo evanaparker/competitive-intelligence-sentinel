@@ -1,9 +1,11 @@
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from openai import OpenAI
 
 from llm import get_client
+
+WINDOW_DAYS = 7
 
 CORRELATION_SCHEMA = {
     "type": "object",
@@ -35,7 +37,11 @@ def _parse(ts: str) -> datetime:
     return datetime.fromisoformat(ts.replace("Z", "+00:00"))
 
 
-def cluster_by_time_window(signals: list[dict], window_days: int = 7) -> list[list[dict]]:
+def window_has_closed(signal: dict, window_days: int = WINDOW_DAYS) -> bool:
+    return (datetime.now(timezone.utc) - _parse(signal["created_at"])) > timedelta(days=window_days)
+
+
+def cluster_by_time_window(signals: list[dict], window_days: int = WINDOW_DAYS) -> list[list[dict]]:
     clusters = []
     remaining = list(signals)
     window = timedelta(days=window_days)

@@ -234,3 +234,90 @@ def test_format_line_variants():
     assert correlate.format_line(
         {"competitor_id": "c1", "signal_ids": ["s1"], "status": "error", "group_id": None, "error": "boom"}
     ) == "ERROR     c1: boom"
+    assert correlate.format_line(
+        {"competitor_id": "c1", "signal_ids": ["s1"], "status": "pending_window", "group_id": None, "error": None}
+    ) == "PENDING   c1: 1 signal (window still open)"
+
+
+from datetime import datetime, timedelta, timezone
+
+
+def test_singleton_signal_still_within_window_is_left_pending_no_write(monkeypatch):
+    recent = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    monkeypatch.setattr(correlate, "get_material_signals", lambda c: [_material_signal("sig1", "snap1", recent)])
+    monkeypatch.setattr(correlate, "get_signal_ids_with_insight", lambda c: set())
+    monkeypatch.setattr(correlate, "get_snapshot", lambda c, sid: _snapshot("snap1", "src1"))
+    monkeypatch.setattr(correlate, "get_source", lambda c, sid: _source("src1", "comp1"))
+    monkeypatch.setattr(correlate, "get_competitor", lambda c, cid: _competitor(cid))
+    assigned = []
+    monkeypatch.setattr(
+        correlate, "assign_correlation_group", lambda c, signal_ids, group_id: assigned.append((signal_ids, group_id))
+    )
+
+    results = correlate.run(client=None)
+
+    assert assigned == []
+    assert results == [
+        {"competitor_id": "comp1", "signal_ids": ["sig1"], "status": "pending_window", "group_id": None, "error": None}
+    ]
+
+
+def test_singleton_signal_past_window_gets_self_assigned(monkeypatch):
+    old = "2026-01-01T00:00:00Z"
+    monkeypatch.setattr(correlate, "get_material_signals", lambda c: [_material_signal("sig1", "snap1", old)])
+    monkeypatch.setattr(correlate, "get_signal_ids_with_insight", lambda c: set())
+    monkeypatch.setattr(correlate, "get_snapshot", lambda c, sid: _snapshot("snap1", "src1"))
+    monkeypatch.setattr(correlate, "get_source", lambda c, sid: _source("src1", "comp1"))
+    monkeypatch.setattr(correlate, "get_competitor", lambda c, cid: _competitor(cid))
+    assigned = {}
+    monkeypatch.setattr(
+        correlate,
+        "assign_correlation_group",
+        lambda c, signal_ids, group_id: assigned.update({tuple(signal_ids): group_id}),
+    )
+
+    results = correlate.run(client=None)
+
+    assert assigned == {("sig1",): "sig1"}
+    assert results == [
+        {"competitor_id": "comp1", "signal_ids": ["sig1"], "status": "singleton", "group_id": "sig1", "error": None}
+    ]
+
+
+def test_assign_correlation_group_failure_does_not_stop_other_competitors(monkeypatch):
+    old = "2026-01-01T00:00:00Z"
+    monkeypatch.setattr(
+        correlate,
+        "get_material_signals",
+        lambda c: [
+            _material_signal("bad1", "snap-bad1", old),
+            _material_signal("good1", "snap-good1", old),
+        ],
+    )
+    monkeypatch.setattr(correlate, "get_signal_ids_with_insight", lambda c: set())
+
+    def fake_get_snapshot(c, sid):
+        source_id = "src-bad" if "bad" in sid else "src-good"
+        return _snapshot(sid, source_id)
+
+    def fake_get_source(c, sid):
+        competitor_id = "comp-bad" if "bad" in sid else "comp-good"
+        return _source(sid, competitor_id)
+
+    monkeypatch.setattr(correlate, "get_snapshot", fake_get_snapshot)
+    monkeypatch.setattr(correlate, "get_source", fake_get_source)
+    monkeypatch.setattr(correlate, "get_competitor", lambda c, cid: _competitor(cid))
+
+    def flaky_assign(c, signal_ids, group_id):
+        if "bad1" in signal_ids:
+            raise RuntimeError("connection reset")
+
+    monkeypatch.setattr(correlate, "assign_correlation_group", flaky_assign)
+
+    results = correlate.run(client=None)
+
+    bad = next(r for r in results if r["competitor_id"] == "comp-bad")
+    good = next(r for r in results if r["competitor_id"] == "comp-good")
+    assert bad["status"] == "error"
+    assert bad["error"] is not None
+    assert good["status"] == "singleton"

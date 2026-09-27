@@ -1,6 +1,6 @@
 import pytest
 
-from db import get_client, update_insight_status
+from db import get_client, update_insight_status, assign_correlation_group
 
 
 class _FakeQuery:
@@ -54,3 +54,45 @@ def test_update_insight_status_advances_updated_at():
     update_insight_status(_FakeClient(captured), "ins1", "approved")
     assert "updated_at" in captured["payload"]
     assert captured["payload"]["updated_at"] != ""
+
+
+class _FakeSignalsQuery:
+    def __init__(self, matched_ids):
+        self._matched_ids = matched_ids
+        self._requested_ids = None
+
+    def update(self, payload):
+        return self
+
+    def in_(self, column, values):
+        self._requested_ids = values
+        return self
+
+    def execute(self):
+        matched = [i for i in self._requested_ids if i in self._matched_ids]
+        return type("Response", (), {"data": [{"id": i} for i in matched]})()
+
+
+class _FakeSignalsClient:
+    def __init__(self, matched_ids):
+        self._matched_ids = matched_ids
+
+    def table(self, name):
+        return _FakeSignalsQuery(self._matched_ids)
+
+
+def test_assign_correlation_group_succeeds_when_all_rows_match():
+    client = _FakeSignalsClient(matched_ids=["sig1", "sig2"])
+    assign_correlation_group(client, ["sig1", "sig2"], "group-x")  # must not raise
+
+
+def test_assign_correlation_group_raises_when_update_matches_nothing():
+    client = _FakeSignalsClient(matched_ids=[])
+    with pytest.raises(RuntimeError, match="sig1"):
+        assign_correlation_group(client, ["sig1"], "sig1")
+
+
+def test_assign_correlation_group_raises_when_update_partially_matches():
+    client = _FakeSignalsClient(matched_ids=["sig1"])
+    with pytest.raises(RuntimeError, match="sig2"):
+        assign_correlation_group(client, ["sig1", "sig2"], "group-x")

@@ -64,7 +64,11 @@ def get_signal_ids_with_insight(client: Client) -> set[str]:
 
 
 def assign_correlation_group(client: Client, signal_ids: list[str], group_id: str) -> None:
-    client.table("signals").update({"correlation_group_id": group_id}).in_("id", signal_ids).execute()
+    response = client.table("signals").update({"correlation_group_id": group_id}).in_("id", signal_ids).execute()
+    matched_ids = {row["id"] for row in response.data}
+    missing = [sid for sid in signal_ids if sid not in matched_ids]
+    if missing:
+        raise RuntimeError(f"assign_correlation_group did not match signal(s) {missing} (requested {signal_ids})")
 
 
 def get_snapshot(client: Client, snapshot_id: str) -> dict:
