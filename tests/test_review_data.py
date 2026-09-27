@@ -123,6 +123,38 @@ def test_submit_review_feedback_failure_after_successful_status_update(monkeypat
     assert result["error"] is not None
 
 
+def test_submit_review_comment_without_rating_is_reported_not_silently_dropped(monkeypatch):
+    monkeypatch.setattr(review_data, "update_insight_status", lambda c, iid, status: {"id": iid, "status": status})
+    called_feedback = []
+    monkeypatch.setattr(review_data, "insert_feedback", lambda *a, **k: called_feedback.append(1))
+
+    result = review_data.submit_review(client=None, insight_id="ins1", decision="approved", comment="looks off")
+
+    assert result["status_updated"] is True
+    assert result["feedback_saved"] is False
+    assert "rating" in result["error"]
+    assert called_feedback == []
+
+
+def test_submit_review_skip_status_update_retries_feedback_only(monkeypatch):
+    called_status = []
+    monkeypatch.setattr(review_data, "update_insight_status", lambda c, iid, status: called_status.append(1))
+    fed = {}
+    monkeypatch.setattr(
+        review_data,
+        "insert_feedback",
+        lambda c, iid, rating, comment=None: fed.update(insight_id=iid, rating=rating) or {"id": "fb1"},
+    )
+
+    result = review_data.submit_review(
+        client=None, insight_id="ins1", decision="approved", rating="useful", skip_status_update=True
+    )
+
+    assert called_status == []
+    assert result == {"status_updated": True, "feedback_saved": True, "error": None}
+    assert fed == {"insight_id": "ins1", "rating": "useful"}
+
+
 def test_error_message_is_never_empty_on_status_failure(monkeypatch):
     def fail_update(c, iid, status):
         raise TimeoutError()  # str(TimeoutError()) == ""

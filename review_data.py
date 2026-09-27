@@ -30,14 +30,26 @@ def get_review_queue(client) -> list[dict]:
 
 
 def submit_review(
-    client, insight_id: str, decision: str, rating: str | None = None, comment: str | None = None
+    client,
+    insight_id: str,
+    decision: str,
+    rating: str | None = None,
+    comment: str | None = None,
+    skip_status_update: bool = False,
 ) -> dict:
-    try:
-        update_insight_status(client, insight_id, decision)
-    except Exception as e:
-        return {"status_updated": False, "feedback_saved": None, "error": f"{type(e).__name__}: {e}"}
+    if not skip_status_update:
+        try:
+            update_insight_status(client, insight_id, decision)
+        except Exception as e:
+            return {"status_updated": False, "feedback_saved": None, "error": f"{type(e).__name__}: {e}"}
 
     if rating is None:
+        if comment:
+            return {
+                "status_updated": True,
+                "feedback_saved": False,
+                "error": "a rating is required to save feedback; comment was not saved",
+            }
         return {"status_updated": True, "feedback_saved": None, "error": None}
 
     try:

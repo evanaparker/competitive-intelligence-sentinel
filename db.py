@@ -1,4 +1,5 @@
 import os
+from datetime import datetime, timezone
 
 from supabase import Client, create_client
 
@@ -138,7 +139,7 @@ def get_signal(client: Client, signal_id: str) -> dict:
 def update_insight_status(client: Client, insight_id: str, status: str) -> dict:
     response = (
         client.table("insights")
-        .update({"status": status})
+        .update({"status": status, "updated_at": datetime.now(timezone.utc).isoformat()})
         .eq("id", insight_id)
         .execute()
     )
