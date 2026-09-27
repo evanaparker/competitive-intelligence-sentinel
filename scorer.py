@@ -17,11 +17,12 @@ SCORING_SCHEMA = {
 
 SYSTEM_PROMPT = (
     "You are a competitive intelligence analyst writing a materiality "
-    "assessment for a product marketing or sales team. You are given a "
-    "signal — a change already classified as material — from a "
-    "competitor's public webpage, including the exact diff and a brief "
-    "summary.\n\n"
-    "Score how materially this change affects sales conversations or "
+    "assessment for a product marketing or sales team. You are given one "
+    "or more signals — changes already classified as material — from a "
+    "competitor's public webpages, including the exact diff and a brief "
+    "summary for each.\n\n"
+    "Score how materially this change (or, if there is more than one "
+    "signal, this combined development) affects sales conversations or "
     "product strategy, on a 1-10 scale:\n"
     "- 1-3: minor — worth having on record, low urgency\n"
     "- 4-6: moderate — sales/product should know this week\n"
@@ -35,20 +36,27 @@ SYSTEM_PROMPT = (
     '"medium", or "low" based on how clear-cut the signal is.\n\n'
     "Write a one-to-two sentence rationale in plain language that a PMM "
     "or sales rep could read directly, citing the specific evidence from "
-    "the diff."
+    "the diff.\n\n"
+    "You may be given more than one signal. If so, they were flagged as "
+    "describing the same underlying business story — write one rationale "
+    "that speaks to the group as a whole, citing evidence from each "
+    "signal that contributed to your score, not just the first one."
 )
 
 
-def score_signal(signal_context: dict, client: OpenAI | None = None) -> dict:
+def score_signal(signals: list[dict], client: OpenAI | None = None) -> dict:
     if client is None:
         client = get_client()
-    user_content = (
-        f"Competitor: {signal_context['competitor_name']}\n"
-        f"Source type: {signal_context['source_type']}\n"
-        f"Theme: {signal_context['theme']}\n"
-        f"Summary: {signal_context['summary']}\n\n"
-        f"Diff:\n{signal_context['diff_text']}"
-    )
+    blocks = []
+    for i, s in enumerate(signals, start=1):
+        blocks.append(
+            f"Signal {i}:\n"
+            f"Source type: {s['source_type']}\n"
+            f"Theme: {s['theme']}\n"
+            f"Summary: {s['summary']}\n\n"
+            f"Diff:\n{s['diff_text']}"
+        )
+    user_content = f"Competitor: {signals[0]['competitor_name']}\n\n" + "\n\n".join(blocks)
     response = client.chat.completions.create(
         model="gpt-5.1",
         messages=[

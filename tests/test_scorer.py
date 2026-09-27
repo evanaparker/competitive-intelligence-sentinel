@@ -40,7 +40,7 @@ class _FakeOpenAIClient:
         self.chat = _FakeChat(_FakeCompletions(response_json))
 
 
-SAMPLE_CONTEXT = {
+SAMPLE_SIGNAL = {
     "diff_text": "[-$500-] {+$750+}",
     "theme": "pricing",
     "summary": "Starting price increased",
@@ -53,15 +53,13 @@ def test_score_signal_returns_parsed_response():
     fake_client = _FakeOpenAIClient(
         {"materiality_score": 8, "confidence": "high", "rationale": "Price rose from $500 to $750."}
     )
-    result = score_signal(SAMPLE_CONTEXT, client=fake_client)
+    result = score_signal([SAMPLE_SIGNAL], client=fake_client)
     assert result == {"materiality_score": 8, "confidence": "high", "rationale": "Price rose from $500 to $750."}
 
 
 def test_score_signal_sends_correct_model_and_strict_schema():
-    fake_client = _FakeOpenAIClient(
-        {"materiality_score": 3, "confidence": "medium", "rationale": "x"}
-    )
-    score_signal(SAMPLE_CONTEXT, client=fake_client)
+    fake_client = _FakeOpenAIClient({"materiality_score": 3, "confidence": "medium", "rationale": "x"})
+    score_signal([SAMPLE_SIGNAL], client=fake_client)
     kwargs = fake_client.chat.completions.last_kwargs
     assert kwargs["model"] == "gpt-5.1"
     assert kwargs["response_format"]["json_schema"]["strict"] is True
@@ -72,15 +70,32 @@ def test_score_signal_sends_correct_model_and_strict_schema():
 
 
 def test_score_signal_includes_diff_and_context_in_prompt():
-    fake_client = _FakeOpenAIClient(
-        {"materiality_score": 8, "confidence": "high", "rationale": "x"}
-    )
-    score_signal(SAMPLE_CONTEXT, client=fake_client)
-    kwargs = fake_client.chat.completions.last_kwargs
-    user_message = kwargs["messages"][-1]["content"]
+    fake_client = _FakeOpenAIClient({"materiality_score": 8, "confidence": "high", "rationale": "x"})
+    score_signal([SAMPLE_SIGNAL], client=fake_client)
+    user_message = fake_client.chat.completions.last_kwargs["messages"][-1]["content"]
     assert "[-$500-] {+$750+}" in user_message
     assert "Sonar" in user_message
     assert "pricing_page" in user_message
+
+
+def test_score_signal_with_multiple_signals_includes_every_signals_evidence():
+    second_signal = {
+        "diff_text": "[-hiring 1-] {+hiring 5+}",
+        "theme": "hiring",
+        "summary": "Posted 3 enterprise AE roles",
+        "competitor_name": "Sonar",
+        "source_type": "job_board",
+    }
+    fake_client = _FakeOpenAIClient({"materiality_score": 9, "confidence": "high", "rationale": "x"})
+    score_signal([SAMPLE_SIGNAL, second_signal], client=fake_client)
+    user_message = fake_client.chat.completions.last_kwargs["messages"][-1]["content"]
+    assert "[-$500-] {+$750+}" in user_message
+    assert "[-hiring 1-] {+hiring 5+}" in user_message
+    assert "Posted 3 enterprise AE roles" in user_message
+    assert "pricing_page" in user_message
+    assert "job_board" in user_message
+    # competitor is stated once, not duplicated per signal
+    assert user_message.count("Sonar") == 1
 
 
 class _RefusalMessage:
@@ -111,4 +126,4 @@ class _RefusalClient:
 
 def test_score_signal_raises_clear_error_on_refusal():
     with pytest.raises(RuntimeError, match="refused"):
-        score_signal(SAMPLE_CONTEXT, client=_RefusalClient())
+        score_signal([SAMPLE_SIGNAL], client=_RefusalClient())
