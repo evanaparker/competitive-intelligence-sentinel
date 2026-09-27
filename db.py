@@ -101,6 +101,61 @@ def get_competitor(client: Client, competitor_id: str) -> dict:
     return response.data[0]
 
 
+def get_pending_insights(client: Client) -> list[dict]:
+    response = (
+        client.table("insights")
+        .select("id, competitor_id, materiality_score, confidence, rationale, created_at")
+        .eq("status", "pending")
+        .order("materiality_score", desc=True)
+        .execute()
+    )
+    return response.data
+
+
+def get_signal_ids_for_insight(client: Client, insight_id: str) -> list[str]:
+    response = (
+        client.table("insight_signals")
+        .select("signal_id")
+        .eq("insight_id", insight_id)
+        .execute()
+    )
+    return [row["signal_id"] for row in response.data]
+
+
+def get_signal(client: Client, signal_id: str) -> dict:
+    response = (
+        client.table("signals")
+        .select("id, diff_text, theme, summary, classification")
+        .eq("id", signal_id)
+        .limit(1)
+        .execute()
+    )
+    if not response.data:
+        raise RuntimeError(f"signal {signal_id} not found")
+    return response.data[0]
+
+
+def update_insight_status(client: Client, insight_id: str, status: str) -> dict:
+    response = (
+        client.table("insights")
+        .update({"status": status})
+        .eq("id", insight_id)
+        .execute()
+    )
+    if not response.data:
+        raise RuntimeError(f"insight {insight_id} not found")
+    return response.data[0]
+
+
+def insert_feedback(client: Client, insight_id: str, rating: str, comment: str | None = None) -> dict:
+    response = (
+        client.table("feedback")
+        .insert({"insight_id": insight_id, "rating": rating, "comment": comment})
+        .execute()
+    )
+    return response.data[0]
+
+
 def insert_insight(
     client: Client, competitor_id: str, materiality_score: int, confidence: str, rationale: str
 ) -> dict:
