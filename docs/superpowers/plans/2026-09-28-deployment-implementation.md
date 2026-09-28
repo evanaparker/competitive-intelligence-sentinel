@@ -27,7 +27,7 @@
 - `_run_stage` must call `ingest.run(client)` (no `openai_client` kwarg) specifically because the module *is* `ingest`, not because `openai_client` happens to be falsy or absent — a wrong branch here is a `TypeError` in production the first time the real pipeline runs, not a test failure caught locally, since `ingest.run()` only accepts one positional argument.
 - `openai_client.close()` must still run even when a stage raises partway through `daily_pipeline` — an oversight here leaks an HTTP client on every failed run, and failed runs are exactly the case this plan is built to make routine and visible (not rare).
 - The review app's privacy setting must be the very next action after its first deploy completes, before anything else — Task 4's own completion contract requires confirming an unauthenticated request is actually blocked before the task is considered done. (Streamlit Community Cloud's deploy flow doesn't support enabling privacy before the app is live the way Azure App Service's Easy Auth did; see Task 4's stated residual-risk note.)
-- A deliberately-failed pipeline run (Task 3's verification) must actually produce a received email, not just an `Alert Rule` that looks correctly configured in the portal — the difference between "configured" and "verified" matters here specifically because there is no unit test that can substitute for it.
+- A deliberately-failed pipeline run (Task 3's verification) must actually produce a confirmed-firing alert, not just an `Alert Rule` that looks correctly configured in the portal — the difference between "configured" and "verified" matters here specifically because there is no unit test that can substitute for it. (Execution note: the alert's *firing* was confirmed live via the Alerts Management API and the Portal; the alert *email* was never confirmed to arrive — see Task 3's ledger ruling and ledger completion line below, which record this gap as accepted rather than resolved.)
 
 ---
 
@@ -417,7 +417,7 @@ Verify via `execute_sql`: `select count(*) from sources where url = 'https://thi
 
 - [ ] **Step 7: Record this task's completion**
 
-Ledger: `Task 3: complete (Alert Rule + Action Group configured and live-verified — a deliberately failing source caused daily_pipeline to fail as expected, and the failure alert email arrived; scratch source cleaned up)`.
+Ledger: `Task 3: complete (Alert Rule + Action Group configured and live-verified — a deliberately failing source caused daily_pipeline to fail as expected, and the alert's firing was confirmed via the Azure Portal and the Alerts Management API; the alert email's delivery was not confirmed — see ruling; scratch source cleaned up)`.
 
 ---
 
@@ -466,11 +466,13 @@ Expected: the Sharing section confirms the app is private and lists your email a
 
 - [ ] **Step 5: Verify unauthenticated access is actually blocked**
 
+Streamlit serves a static shell and renders `review.py`'s content client-side over a websocket, so a title never appears in the raw HTML even for a fully public app — grepping the fetched body for app text passes regardless of the Sharing setting and proves nothing. Check the HTTP status/redirect instead:
+
 ```bash
-curl -s https://<your-app>.streamlit.app/ | grep -o "Competitive Intelligence Sentinel" || echo "app content not visible unauthenticated"
+curl -s -o /dev/null -w "%{http_code}\n" https://<your-app>.streamlit.app/
 ```
 
-Expected: `app content not visible unauthenticated` — the real app title must not appear in an anonymous fetch of the page. If the title *does* appear, stop: Step 4 didn't take effect (check the Sharing setting again) before proceeding.
+Expected: `303` (a redirect to Streamlit's own auth flow, e.g. `share.streamlit.io/-/auth/app`) — not `200`. A `200` means Step 4 didn't take effect (check the Sharing setting again) before proceeding.
 
 - [ ] **Step 6 (you, in a browser): Sign in and confirm the review app actually loads**
 

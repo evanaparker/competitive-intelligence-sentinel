@@ -95,9 +95,9 @@ func azure functionapp publish cisentinel-pipeline
 
 The review app redeploys itself automatically on every push to `main` (Streamlit Community Cloud watches the connected GitHub repo) — no manual redeploy command for it. The pipeline's redeploy command runs from the repo root and requires the Azure CLI and Azure Functions Core Tools already authenticated via `az login`. Neither this nor the review app's auto-redeploy is CI/CD in the tested/gated sense — there's no test run before either goes live, matching this PoC's single-operator, infrequent-deploy scale.
 
-Not deployed anywhere yet — runs locally, same as every other script in this repo so far.
+Moving the review app off Azure changed where `SUPABASE_SERVICE_ROLE_KEY` (which bypasses RLS entirely) is stored: it now lives in Streamlit Community Cloud's Secrets store instead of an Azure resource's Application Settings, for an app whose source repo is public. Accepted as part of the same free-tier tradeoff as the App Service swap above — the key itself is never exposed in the app's own output.
 
-### Running tests
+## Running tests
 
 ```bash
 PYTHONPATH=.deps python3 -m pytest tests/ -v

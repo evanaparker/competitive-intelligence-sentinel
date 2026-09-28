@@ -1,4 +1,5 @@
 .git*
+.env
 .deps/
 .venv/
 __pycache__/
