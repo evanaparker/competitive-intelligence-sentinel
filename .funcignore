@@ -1,0 +1,13 @@
+.git*
+.deps/
+.venv/
+__pycache__/
+*.pyc
+tests/
+.worktrees/
+docs/
+supabase/
+review.py
+review_data.py
+run_review_app.sh
+.superpowers/
