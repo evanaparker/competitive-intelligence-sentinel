@@ -1,0 +1,565 @@
+# Deployment Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Automate the existing pipeline (`ingest.py` → `classify.py` → `correlate.py` → `score.py`) to run daily on Azure Functions, and host the review app (`review.py`) on Azure App Service behind Microsoft Entra ID authentication — without changing any pipeline logic.
+
+**Architecture:** One new file, `function_app.py`, wraps the four existing scripts' `run()`/`format_line()` functions in a single Timer-Triggered Azure Function that stops at the first stage reporting an error. `review.py` deploys unchanged to Azure App Service. Both resources read credentials from their own Application Settings, not `.env`.
+
+**Tech Stack:** Azure Functions (Python v2 programming model, Consumption plan), Azure App Service (Linux, Python, F1 Free tier), Azure Monitor + Application Insights, `pytest`.
+
+**Spec:** [docs/superpowers/specs/2026-09-28-deployment-design.md](../specs/2026-09-28-deployment-design.md)
+
+## Global Constraints
+
+- `function_app.py`/`host.json`/`.funcignore` live at the repo root, next to `ingest.py`/`classify.py`/etc. — no `src/` restructuring, no path manipulation to import them.
+- No changes to `ingest.py`, `classify.py`, `correlate.py`, `score.py`, `review.py`, `review_data.py`, or `db.py`. This plan only adds files.
+- `requirements.txt` gains exactly one line: `azure-functions==1.25.0` (confirmed current stable release).
+- Azure resources: Function App on the classic **Consumption** plan with connection-string-based storage auth (not Flex Consumption / managed identity) — chosen explicitly to minimize the number of resources (no user-assigned identity, no role assignments) for this PoC's scale. App Service on the **F1 (Free)** tier, no Always On — chosen explicitly to spend no ongoing cost.
+- All resources go in one new resource group: `cisentinel-deploy-rg`, region `eastus` (adjust the region in every command below together if a different one is preferred — there's no per-resource reason to split them across regions).
+- Credentials live in each resource's **Application Settings** — no Key Vault.
+- **Execution model for this plan only, different from every prior sub-project's plan:** this session has no Azure CLI or Azure credentials of its own. Steps marked **(you, in your terminal)** are commands the user runs themselves, having already run `az login`; steps marked **(Claude)** are ones executed normally in this session (writing/testing code, or an external check like `curl` against a now-public URL that needs no Azure credentials). Every **(you, in your terminal)** step has an `Expected:` line — paste back what you actually see so the step can be confirmed before moving on, exactly like any other step in this plan.
+- Global resource-name uniqueness: storage account, Function App, and App Service names must each be globally unique across all of Azure. The names below are this plan's first choice; if `az` reports a name is already taken, pick a different suffix (e.g. append your initials or a few digits) and use that same substituted name in every subsequent command in that task — this is a real, unavoidable Azure constraint, not a placeholder to resolve later.
+
+## Review Focus
+
+- A pipeline stage's `run()` reporting even one per-item error must stop `daily_pipeline` before the next stage runs — not just log the error and continue. This is the plan's central behavior change from "run manually and read the output" to "run unattended and trust it stopped when it should have."
+- `_run_stage` must call `ingest.run(client)` (no `openai_client` kwarg) specifically because the module *is* `ingest`, not because `openai_client` happens to be falsy or absent — a wrong branch here is a `TypeError` in production the first time the real pipeline runs, not a test failure caught locally, since `ingest.run()` only accepts one positional argument.
+- `openai_client.close()` must still run even when a stage raises partway through `daily_pipeline` — an oversight here leaks an HTTP client on every failed run, and failed runs are exactly the case this plan is built to make routine and visible (not rare).
+- The App Service must never be reachable unauthenticated, even briefly during initial deployment — Task 4 enables Easy Auth as part of the same task as the first deploy, not as a follow-up step, and its own completion contract requires confirming an unauthenticated request is actually blocked before the task is considered done.
+- A deliberately-failed pipeline run (Task 3's verification) must actually produce a received email, not just an `Alert Rule` that looks correctly configured in the portal — the difference between "configured" and "verified" matters here specifically because there is no unit test that can substitute for it.
+
+---
+
+### Task 1: `function_app.py`, `host.json`, `.funcignore`
+
+**Files:**
+- Create: `function_app.py`, `host.json`, `.funcignore` (all repo root)
+- Modify: `requirements.txt` (add `azure-functions==1.25.0`)
+- Test: `tests/test_function_app.py`
+
+**Interfaces:**
+- Consumes: `ingest.run(client)`, `classify.run(client, openai_client=None)`, `correlate.run(client, openai_client=None)`, `score.run(client, openai_client=None)`, and each module's `format_line(r)` — all already merged, unchanged. `db.get_client` (as `get_supabase_client`), `llm.get_client` (as `get_openai_client`) — already merged, unchanged.
+- Produces: `function_app.app` (the `func.FunctionApp()` instance Azure's runtime discovers), `function_app._run_stage`, `function_app.daily_pipeline` — consumed only by Azure's Functions runtime after deployment (Task 2), not imported by any other module in this repo.
+
+- [ ] **Step 1: Write the failing tests**
+
+Create `tests/test_function_app.py`:
+
+```python
+import types
+
+import pytest
+
+import function_app
+import ingest
+
+
+def _fake_module(name, run_fn, format_line_fn=None):
+    fake = types.SimpleNamespace()
+    fake.__name__ = name
+    fake.run = run_fn
+    fake.format_line = format_line_fn or (lambda r: f"{r['status']} {r.get('error', '')}")
+    return fake
+
+
+def test_run_stage_does_not_raise_when_no_errors():
+    fake = _fake_module("fake", lambda client, openai_client=None: [{"error": None, "status": "ok"}])
+    function_app._run_stage(fake, client=None, openai_client=None)  # must not raise
+
+
+def test_run_stage_raises_naming_module_and_first_error():
+    fake = _fake_module(
+        "fake_stage",
+        lambda client, openai_client=None: [
+            {"error": None, "status": "ok"},
+            {"error": "RuntimeError: boom", "status": "error"},
+        ],
+    )
+    with pytest.raises(RuntimeError, match="fake_stage"):
+        function_app._run_stage(fake, client=None, openai_client=None)
+
+
+def test_run_stage_error_message_includes_first_errors_text():
+    fake = _fake_module(
+        "fake_stage",
+        lambda client, openai_client=None: [{"error": "RuntimeError: boom", "status": "error"}],
+    )
+    with pytest.raises(RuntimeError, match="boom"):
+        function_app._run_stage(fake, client=None, openai_client=None)
+
+
+def test_run_stage_calls_ingest_without_openai_client_kwarg(monkeypatch):
+    captured = {}
+
+    def fake_ingest_run(client):
+        captured["called_with_client_only"] = True
+        return [{"error": None, "status": "ok"}]
+
+    monkeypatch.setattr(ingest, "run", fake_ingest_run)
+    function_app._run_stage(ingest, client="fake-client", openai_client="fake-openai-client")
+    assert captured.get("called_with_client_only") is True
+
+
+def test_run_stage_calls_non_ingest_modules_with_openai_client_kwarg():
+    captured = {}
+
+    def fake_run(client, openai_client=None):
+        captured["openai_client"] = openai_client
+        return [{"error": None, "status": "ok"}]
+
+    fake = _fake_module("not_ingest", fake_run)
+    function_app._run_stage(fake, client="fake-client", openai_client="fake-openai-client")
+    assert captured["openai_client"] == "fake-openai-client"
+
+
+def test_daily_pipeline_runs_stages_in_order_and_stops_on_first_failure(monkeypatch):
+    calls = []
+
+    def fake_run_stage(module, client, openai_client=None):
+        calls.append(module)
+        if module == "classify":
+            raise RuntimeError("boom")
+
+    monkeypatch.setattr(function_app, "_run_stage", fake_run_stage)
+    monkeypatch.setattr(function_app, "ingest", "ingest")
+    monkeypatch.setattr(function_app, "classify", "classify")
+    monkeypatch.setattr(function_app, "correlate", "correlate")
+    monkeypatch.setattr(function_app, "score", "score")
+    monkeypatch.setattr(function_app, "get_supabase_client", lambda: "supabase-client")
+
+    closed = []
+
+    class _FakeOpenAIClient:
+        def close(self):
+            closed.append(1)
+
+    monkeypatch.setattr(function_app, "get_openai_client", lambda: _FakeOpenAIClient())
+
+    with pytest.raises(RuntimeError, match="boom"):
+        function_app.daily_pipeline(timer=None)
+
+    assert calls == ["ingest", "classify"]  # stopped before correlate/score ever ran
+    assert closed == [1]  # cleanup still ran despite the exception
+
+
+def test_daily_pipeline_runs_all_four_stages_when_nothing_fails(monkeypatch):
+    calls = []
+    monkeypatch.setattr(function_app, "_run_stage", lambda module, client, openai_client=None: calls.append(module))
+    monkeypatch.setattr(function_app, "ingest", "ingest")
+    monkeypatch.setattr(function_app, "classify", "classify")
+    monkeypatch.setattr(function_app, "correlate", "correlate")
+    monkeypatch.setattr(function_app, "score", "score")
+    monkeypatch.setattr(function_app, "get_supabase_client", lambda: "supabase-client")
+
+    class _FakeOpenAIClient:
+        def close(self):
+            pass
+
+    monkeypatch.setattr(function_app, "get_openai_client", lambda: _FakeOpenAIClient())
+
+    function_app.daily_pipeline(timer=None)
+
+    assert calls == ["ingest", "classify", "correlate", "score"]
+```
+
+- [ ] **Step 2: Run to verify it fails**
+
+Run: `PYTHONPATH=.deps python3 -m pytest tests/test_function_app.py -v`
+Expected: `ModuleNotFoundError: No module named 'function_app'` (or an `azure.functions` import error if that dependency isn't installed yet — install it first: `pip3 install --target=.deps azure-functions==1.25.0`, then re-run to confirm the failure is specifically the missing `function_app` module).
+
+- [ ] **Step 3: Write `function_app.py`**
+
+```python
+import logging
+
+import azure.functions as func
+
+import ingest
+import classify
+import correlate
+import score
+from db import get_client as get_supabase_client
+from llm import get_client as get_openai_client
+
+app = func.FunctionApp()
+
+
+def _run_stage(module, client, openai_client=None) -> None:
+    results = module.run(client) if module is ingest else module.run(client, openai_client=openai_client)
+    for r in results:
+        logging.info(module.format_line(r))
+    errors = [r for r in results if r["error"] is not None]
+    if errors:
+        raise RuntimeError(f"{module.__name__} reported {len(errors)} error(s): {errors[0]['error']}")
+
+
+@app.timer_trigger(schedule="0 0 6 * * *", arg_name="timer", run_on_startup=False)
+def daily_pipeline(timer: func.TimerRequest) -> None:
+    supabase_client = get_supabase_client()
+    openai_client = get_openai_client()
+    try:
+        _run_stage(ingest, supabase_client)
+        _run_stage(classify, supabase_client, openai_client=openai_client)
+        _run_stage(correlate, supabase_client, openai_client=openai_client)
+        _run_stage(score, supabase_client, openai_client=openai_client)
+    finally:
+        openai_client.close()
+```
+
+- [ ] **Step 4: Write `host.json`**
+
+```json
+{
+  "version": "2.0",
+  "logging": {
+    "applicationInsights": {
+      "samplingSettings": {
+        "isEnabled": true
+      }
+    }
+  }
+}
+```
+
+- [ ] **Step 5: Write `.funcignore`**
+
+Excludes everything from the deployment package that the Function App doesn't need — the local `.deps/` install (Azure's own remote build does its own `pip install` from `requirements.txt`, in a build environment matched to the target host, so bundling this repo's local install is both unnecessary and a needless few hundred MB), the test suite, git internals, worktrees, docs, the Supabase migrations folder, and the review app (App Service gets `review.py` separately in Task 4, not via this Function App's package):
+
+```
+.git*
+.deps/
+.venv/
+__pycache__/
+*.pyc
+tests/
+.worktrees/
+docs/
+supabase/
+review.py
+review_data.py
+run_review_app.sh
+.superpowers/
+```
+
+- [ ] **Step 6: Add the new dependency to `requirements.txt`**
+
+Append `azure-functions==1.25.0` as a new line.
+
+- [ ] **Step 7: Run to verify it passes**
+
+Run: `PYTHONPATH=.deps python3 -m pytest tests/test_function_app.py -v`
+Expected: 7 passed.
+
+- [ ] **Step 8: Run the whole suite**
+
+Run: `PYTHONPATH=.deps python3 -m pytest tests/ -v`
+Expected: all tests pass (110 pre-existing plus this task's 7 new ones = 117).
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add function_app.py host.json .funcignore requirements.txt tests/test_function_app.py
+git commit -m "feat: add function_app.py orchestrating the daily pipeline"
+```
+
+---
+
+### Task 2: Provision and deploy the Azure Function App
+
+**Files:** none — this task provisions live Azure resources and deploys Task 1's code to them.
+
+**Interfaces:**
+- Consumes: `function_app.py`, `host.json`, `.funcignore`, `requirements.txt` (Task 1) — deployed as-is, unmodified.
+
+- [ ] **Step 1 (you, in your terminal): Install Azure Functions Core Tools**, if not already installed (needed for `func azure functionapp publish`):
+
+macOS: `brew tap azure/functions && brew install azure-functions-core-tools@4`
+Linux (Debian/Ubuntu):
+```bash
+curl https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor > microsoft.gpg
+sudo mv microsoft.gpg /etc/apt/trusted.gpg.d/microsoft.gpg
+sudo sh -c 'echo "deb [arch=amd64] https://packages.microsoft.com/repos/microsoft-ubuntu-$(lsb_release -cs)-prod $(lsb_release -cs) main" > /etc/apt/sources.list.d/dotnetdev.list'
+sudo apt-get update
+sudo apt-get install azure-functions-core-tools-4
+```
+Windows: `winget install Microsoft.Azure.FunctionsCoreTools`
+
+Expected: `func --version` prints a `4.x.x` version.
+
+- [ ] **Step 2 (you, in your terminal): Create the resource group**
+
+```bash
+az group create --name cisentinel-deploy-rg --location eastus
+```
+
+Expected: JSON output with `"provisioningState": "Succeeded"`.
+
+- [ ] **Step 3 (you, in your terminal): Create the storage account the Function App needs internally**
+
+```bash
+az storage account create \
+  --name cisentinelfuncst \
+  --resource-group cisentinel-deploy-rg \
+  --location eastus \
+  --sku Standard_LRS
+```
+
+Expected: JSON output with `"provisioningState": "Succeeded"`. If it fails with a name-uniqueness error, pick a different name (e.g. `cisentinelfuncst2`) and use that name in this and every following command that references it.
+
+- [ ] **Step 4 (you, in your terminal): Create the Function App** (classic Consumption plan, Python 3.12, Linux — Application Insights is created automatically as part of this command unless explicitly disabled, which this doesn't do)
+
+```bash
+az functionapp create \
+  --resource-group cisentinel-deploy-rg \
+  --name cisentinel-pipeline \
+  --consumption-plan-location eastus \
+  --runtime python \
+  --runtime-version 3.12 \
+  --os-type Linux \
+  --storage-account cisentinelfuncst \
+  --functions-version 4
+```
+
+Expected: JSON output with `"state": "Running"`. Same name-uniqueness caveat as Step 3 — the Function App's name becomes part of a public hostname (`<name>.azurewebsites.net`), so it must be globally unique; substitute and reuse a new name if this errors.
+
+- [ ] **Step 5 (you, in your terminal): Set Application Settings** (the four credentials `function_app.py` needs — paste your real values, the same ones already in your local `.env`)
+
+```bash
+az functionapp config appsettings set \
+  --name cisentinel-pipeline \
+  --resource-group cisentinel-deploy-rg \
+  --settings \
+    SUPABASE_URL="<your SUPABASE_URL>" \
+    SUPABASE_SERVICE_ROLE_KEY="<your SUPABASE_SERVICE_ROLE_KEY>" \
+    AZURE_OPENAI_ENDPOINT="<your AZURE_OPENAI_ENDPOINT>" \
+    AZURE_OPENAI_API_KEY="<your AZURE_OPENAI_API_KEY>"
+```
+
+Expected: JSON array listing all four settings back (values shown, since this is your own terminal — this output never needs to be pasted back to Claude).
+
+- [ ] **Step 6 (you, in your terminal): Deploy the code**, run from the repo root (the same directory as `function_app.py`)
+
+```bash
+func azure functionapp publish cisentinel-pipeline
+```
+
+Expected: ends with `Deployment successful.` and `Functions in cisentinel-pipeline:` listing `daily_pipeline - [timerTrigger]`. Paste back the full output.
+
+- [ ] **Step 7 (you, in the Azure Portal): Manually trigger the function once to verify a real end-to-end run**
+
+Portal → your Function App (`cisentinel-pipeline`) → Functions → `daily_pipeline` → Code + Test → Test/Run → Run. Wait ~10-30 seconds (this run hits the real Sonar pricing page, the real Supabase project, and real Azure OpenAI calls — the exact same side effects a manual `python3 ingest.py && python3 classify.py && python3 correlate.py && python3 score.py` would have).
+
+Expected: the Test/Run panel shows the invocation completed; the Logs pane (or Application Insights → Logs → `traces`) shows the `logging.info(...)` lines from `_run_stage` — one `SAME <url>` or `CHANGED <url>` line from `ingest`, then classify/correlate/score's own lines, ending without an exception. Paste back what the Logs pane shows.
+
+- [ ] **Step 8: Verify in Supabase that the run actually did something**
+
+Run via the Supabase MCP `execute_sql` tool:
+
+```sql
+select count(*) from snapshots where fetched_at > now() - interval '5 minutes';
+```
+
+Expected: `1` (the snapshot Step 7's `ingest` stage just inserted) — confirms the deployed function reached the real database, not just that Azure reported success.
+
+- [ ] **Step 9: Record this task's completion**
+
+No pytest command applies (this task provisioned and live-verified real infrastructure). Ledger: `Task 2: complete (Function App cisentinel-pipeline deployed and live-verified — manual trigger completed successfully, Supabase shows a new snapshot from the run)`.
+
+---
+
+### Task 3: Configure and verify failure alerting
+
+**Files:** none — Azure Monitor configuration only.
+
+**Interfaces:**
+- Consumes: the Function App and its Application Insights instance from Task 2.
+
+- [ ] **Step 1 (you, in the Azure Portal): Create the Action Group**
+
+Portal → Monitor → Alerts → Action Groups → Create. Resource group `cisentinel-deploy-rg`, region `Global`, name `cisentinel-ops-alerts`, short name (12 chars max) `cisentops`. Under Notifications, add an Email notification with your own address. Save.
+
+Expected: the Action Group appears in the list with your email listed under it.
+
+- [ ] **Step 2 (you, in the Azure Portal): Create the Alert Rule**
+
+Portal → your Function App (`cisentinel-pipeline`) → Monitoring → Alerts → Create → Alert rule. Scope is already the Function App. Condition → Signal name: **"Failed function executions"** (a built-in metric, no query to write) → threshold: Greater than 0, aggregation over a 5-minute window (or the smallest window the portal offers). Actions → select the `cisentinel-ops-alerts` Action Group from Step 1. Name the rule `cisentinel-pipeline-failure-alert`. Create.
+
+Expected: the Alert Rule appears as Enabled in the Function App's Alerts list.
+
+- [ ] **Step 3: Seed a source that will deliberately fail `ingest.py`'s fetch step**
+
+Via the Supabase MCP `execute_sql` tool:
+
+```sql
+insert into sources (competitor_id, source_type, url, is_active)
+values ((select id from competitors where name = 'Sonar'), 'other', 'https://this-domain-does-not-exist-cis-test.invalid', true)
+returning id;
+```
+
+- [ ] **Step 4 (you, in the Azure Portal): Manually trigger `daily_pipeline` again** (same Test/Run panel as Task 2 Step 7)
+
+Expected: this time the run fails — the Test/Run panel (or Application Insights → Failures) shows an exception whose message names the fake source's URL and an `error()`/connection-type failure, matching `ingest.py`'s existing per-item error format (`ERROR   <url>: <message>`) wrapped in `_run_stage`'s `RuntimeError`. Paste back what you see.
+
+- [ ] **Step 5: Wait for the alert email, then confirm it arrived**
+
+The Alert Rule's evaluation window (Step 2) determines how long this takes — allow up to that window's length plus a few minutes for the Action Group to fire. Confirm you received an email referencing `cisentinel-pipeline-failure-alert` or `cisentinel-pipeline`.
+
+Expected: an email arrived. This is the one step in this whole plan that cannot be verified any other way — if it doesn't arrive within a reasonable margin past the evaluation window, check the Action Group's email address and the Alert Rule's condition/scope before re-triggering.
+
+- [ ] **Step 6: Clean up the deliberately-broken source**
+
+```sql
+delete from sources where url = 'https://this-domain-does-not-exist-cis-test.invalid';
+```
+
+Verify via `execute_sql`: `select count(*) from sources where url = 'https://this-domain-does-not-exist-cis-test.invalid';` → `0`.
+
+- [ ] **Step 7: Record this task's completion**
+
+Ledger: `Task 3: complete (Alert Rule + Action Group configured and live-verified — a deliberately failing source caused daily_pipeline to fail as expected, and the failure alert email arrived; scratch source cleaned up)`.
+
+---
+
+### Task 4: Provision and deploy the review app, with Easy Auth from the first deploy
+
+**Files:** none — Azure resource provisioning and a deploy of `review.py` (unchanged).
+
+**Interfaces:**
+- Consumes: `review.py`, `review_data.py`, `db.py`, `requirements.txt` — all already merged, unchanged.
+
+- [ ] **Step 1 (you, in your terminal): Create the App Service plan (F1, Linux)**
+
+```bash
+az appservice plan create \
+  --name cisentinel-review-plan \
+  --resource-group cisentinel-deploy-rg \
+  --location eastus \
+  --sku F1 \
+  --is-linux
+```
+
+Expected: JSON output with `"status": "Ready"`.
+
+- [ ] **Step 2 (you, in your terminal): Create the Web App**
+
+```bash
+az webapp create \
+  --name cisentinel-review \
+  --resource-group cisentinel-deploy-rg \
+  --plan cisentinel-review-plan \
+  --runtime "PYTHON:3.12"
+```
+
+Expected: JSON output with a `defaultHostName` of `cisentinel-review.azurewebsites.net`. Same name-uniqueness caveat as Task 2 — substitute and reuse a new name if this errors.
+
+- [ ] **Step 3 (you, in your terminal): Set the startup command** (App Service's own Oryx build installs `requirements.txt` automatically on deploy — no `.deps`/`PYTHONPATH` workaround needed here, that was only ever this sandbox's fix for its own missing venv)
+
+```bash
+az webapp config set \
+  --name cisentinel-review \
+  --resource-group cisentinel-deploy-rg \
+  --startup-file "python -m streamlit run review.py --server.port 8000 --server.address 0.0.0.0"
+```
+
+Expected: JSON output showing the `appCommandLine` field set to the command above.
+
+- [ ] **Step 4 (you, in your terminal): Set Application Settings** (only the Supabase credentials — `review.py` never calls an LLM)
+
+```bash
+az webapp config appsettings set \
+  --name cisentinel-review \
+  --resource-group cisentinel-deploy-rg \
+  --settings \
+    SUPABASE_URL="<your SUPABASE_URL>" \
+    SUPABASE_SERVICE_ROLE_KEY="<your SUPABASE_SERVICE_ROLE_KEY>"
+```
+
+Expected: JSON array listing both settings back.
+
+- [ ] **Step 5 (you, in the Azure Portal): Enable Easy Auth BEFORE the first deploy of code** — this ordering matters: the app must never be reachable, even for the few minutes between a code deploy and enabling auth
+
+Portal → your Web App (`cisentinel-review`) → Authentication → Add identity provider → Microsoft Entra ID (Microsoft) → keep the default "Express" app registration (creates a new one scoped to just this app) → under "Restrict access", choose **"Require authentication"** → Action to take when request is not authenticated: **"HTTP 302 Found redirect... recommended for websites"** → Add.
+
+Expected: the Authentication blade shows Microsoft as an enabled identity provider, and "App Service authentication" is toggled on.
+
+- [ ] **Step 6: Verify unauthenticated access is actually blocked, before any code is deployed** — from this sandbox (a plain HTTPS request needs no Azure credentials)
+
+```bash
+curl -s -o /dev/null -w "%{http_code}\n" https://cisentinel-review.azurewebsites.net/
+```
+
+Expected: `302` (redirect to Microsoft's sign-in page) — not `200`. If this is `200`, stop: do not proceed to Step 7 until Step 5's configuration is fixed and this check passes.
+
+- [ ] **Step 7 (you, in your terminal): Deploy `review.py`**, run from the repo root
+
+```bash
+az webapp up \
+  --name cisentinel-review \
+  --resource-group cisentinel-deploy-rg \
+  --plan cisentinel-review-plan \
+  --runtime "PYTHON:3.12"
+```
+
+Expected: ends with a message confirming the app was deployed, giving the same `cisentinel-review.azurewebsites.net` URL.
+
+- [ ] **Step 8: Re-verify unauthenticated access is still blocked after deploy**
+
+```bash
+curl -s -o /dev/null -w "%{http_code}\n" https://cisentinel-review.azurewebsites.net/
+```
+
+Expected: `302`, unchanged from Step 6 — confirms the deploy didn't reset the Authentication setting.
+
+- [ ] **Step 9 (you, in a browser): Sign in and confirm the review app actually loads**
+
+Visit `https://cisentinel-review.azurewebsites.net/` in a browser, sign in with the Microsoft account tied to your Azure subscription when prompted, and confirm the Streamlit app loads (it will show "Nothing to review — no pending insights." unless there's a real pending insight, which is the correct, expected state).
+
+Expected: the app loads after sign-in, showing the same UI verified live in the Human Feedback Loop sub-project.
+
+- [ ] **Step 10: Record this task's completion**
+
+Ledger: `Task 4: complete (App Service cisentinel-review deployed with Easy Auth enabled before the first deploy — unauthenticated access confirmed blocked (302) both before and after deploy, authenticated access confirmed working)`.
+
+---
+
+### Task 5: Document deployment in README
+
+**Files:**
+- Modify: `README.md`
+
+- [ ] **Step 1: Add a "Deployment" section**
+
+Insert after the existing "## Running the review app" section:
+
+```markdown
+## Deployment
+
+The pipeline (`ingest.py` → `classify.py` → `correlate.py` → `score.py`) runs automatically once daily (06:00 UTC) on an Azure Function App (`cisentinel-pipeline`, resource group `cisentinel-deploy-rg`), via `function_app.py`'s `daily_pipeline` — the exact same `run()`/`format_line()` functions each script's own `__main__` block calls, wrapped in a Timer Trigger that stops at the first stage reporting an error rather than continuing to the next. A failed run triggers an Azure Monitor alert (`cisentinel-pipeline-failure-alert`) that emails the operator.
+
+The review app is hosted at `https://cisentinel-review.azurewebsites.net/` (App Service, F1 Free tier, resource group `cisentinel-deploy-rg`) behind Microsoft Entra ID authentication (Easy Auth) — only the operator's Microsoft account can reach it.
+
+Redeploying after a code change:
+
+```bash
+# Pipeline
+func azure functionapp publish cisentinel-pipeline
+
+# Review app
+az webapp up --name cisentinel-review --resource-group cisentinel-deploy-rg --plan cisentinel-review-plan --runtime "PYTHON:3.12"
+```
+
+Both commands run from the repo root and require the Azure CLI (and, for the Function App, Azure Functions Core Tools) already authenticated via `az login`. Neither is automated (no CI/CD) — deploying is a manual step the operator runs when there's something new to ship, matching this PoC's single-operator, infrequent-deploy scale.
+```
+
+- [ ] **Step 2: Verify**
+
+Run: `grep -q "cisentinel-pipeline" README.md && grep -q "cisentinel-review" README.md && echo "README documents deployment"`
+Expected: `README documents deployment`.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add README.md
+git commit -m "docs: document deployment"
+```
