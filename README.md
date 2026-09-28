@@ -80,9 +80,24 @@ Shows every `pending` insight (highest materiality first) with its competitor, s
 
 `--global.developmentMode false` is required with the `--target=.deps` install described above: without a `site-packages` directory in its module path, Streamlit assumes it's running from its own source checkout and switches into a mode that refuses a fixed `--server.port`. If your environment installs Streamlit normally (e.g. into a venv), this flag is unnecessary but harmless.
 
-Not deployed anywhere yet — runs locally, same as every other script in this repo so far.
+## Deployment
 
-### Running tests
+The pipeline (`ingest.py` → `classify.py` → `correlate.py` → `score.py`) runs automatically once daily (06:00 UTC) on an Azure Function App (`cisentinel-pipeline`, resource group `cisentinel-deploy-rg`), via `function_app.py`'s `daily_pipeline` — the exact same `run()`/`format_line()` functions each script's own `__main__` block calls, wrapped in a Timer Trigger that stops at the first stage reporting an error rather than continuing to the next. A failed run triggers an Azure Monitor alert (`cisentinel-pipeline-failure-alert`) linked to an Action Group with an email notification (delivery of that email was not confirmed live — see the plan's ledger — the alert firing itself was confirmed via both the Azure Portal and the Alerts Management API).
+
+The review app is hosted on **Streamlit Community Cloud** (deployed from this repo's `main` branch, `review.py`) at [`competitive-intelligence-sentinel-ub9p9fhuskw6pkmtdgjb4a.streamlit.app`](https://competitive-intelligence-sentinel-ub9p9fhuskw6pkmtdgjb4a.streamlit.app), set to private ("Only specific people can view this app") — only explicitly invited viewers can reach it. Chosen over Azure App Service because this subscription's App Service F1 (Free) tier has a quota of 0, and the paid B1 tier was declined to avoid ongoing cost.
+
+Redeploying after a code change:
+
+```bash
+# Pipeline
+func azure functionapp publish cisentinel-pipeline
+```
+
+The review app redeploys itself automatically on every push to `main` (Streamlit Community Cloud watches the connected GitHub repo) — no manual redeploy command for it. The pipeline's redeploy command runs from the repo root and requires the Azure CLI and Azure Functions Core Tools already authenticated via `az login`. Neither this nor the review app's auto-redeploy is CI/CD in the tested/gated sense — there's no test run before either goes live, matching this PoC's single-operator, infrequent-deploy scale.
+
+Moving the review app off Azure changed where `SUPABASE_SERVICE_ROLE_KEY` (which bypasses RLS entirely) is stored: it now lives in Streamlit Community Cloud's Secrets store instead of an Azure resource's Application Settings, for an app whose source repo is public. Accepted as part of the same free-tier tradeoff as the App Service swap above — the key itself is never exposed in the app's own output.
+
+## Running tests
 
 ```bash
 PYTHONPATH=.deps python3 -m pytest tests/ -v
