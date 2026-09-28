@@ -2,11 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Automate the existing pipeline (`ingest.py` → `classify.py` → `correlate.py` → `score.py`) to run daily on Azure Functions, and host the review app (`review.py`) on Azure App Service behind Microsoft Entra ID authentication — without changing any pipeline logic.
+**Goal:** Automate the existing pipeline (`ingest.py` → `classify.py` → `correlate.py` → `score.py`) to run daily on Azure Functions, and host the review app (`review.py`) at a persistent, private URL — without changing any pipeline logic.
 
-**Architecture:** One new file, `function_app.py`, wraps the four existing scripts' `run()`/`format_line()` functions in a single Timer-Triggered Azure Function that stops at the first stage reporting an error. `review.py` deploys unchanged to Azure App Service. Both resources read credentials from their own Application Settings, not `.env`.
+**Architecture:** One new file, `function_app.py`, wraps the four existing scripts' `run()`/`format_line()` functions in a single Timer-Triggered Azure Function that stops at the first stage reporting an error. `review.py` deploys unchanged to Streamlit Community Cloud (see Task 4 for why this replaced the original Azure App Service design). The Function App reads credentials from its Application Settings; the review app reads the same-shaped credentials from Streamlit Cloud's Secrets, which Streamlit exposes as `os.environ` — neither needs `.env`.
 
-**Tech Stack:** Azure Functions (Python v2 programming model, Consumption plan), Azure App Service (Linux, Python, F1 Free tier), Azure Monitor + Application Insights, `pytest`.
+**Tech Stack:** Azure Functions (Python v2 programming model, Consumption plan), Azure Monitor + Application Insights, Streamlit Community Cloud, `pytest`.
 
 **Spec:** [docs/superpowers/specs/2026-09-28-deployment-design.md](../specs/2026-09-28-deployment-design.md)
 
@@ -15,7 +15,7 @@
 - `function_app.py`/`host.json`/`.funcignore` live at the repo root, next to `ingest.py`/`classify.py`/etc. — no `src/` restructuring, no path manipulation to import them.
 - No changes to `ingest.py`, `classify.py`, `correlate.py`, `score.py`, `review.py`, `review_data.py`, or `db.py`. This plan only adds files.
 - `requirements.txt` gains exactly one line: `azure-functions==1.25.0` (confirmed current stable release).
-- Azure resources: Function App on the classic **Consumption** plan with connection-string-based storage auth (not Flex Consumption / managed identity) — chosen explicitly to minimize the number of resources (no user-assigned identity, no role assignments) for this PoC's scale. App Service on the **F1 (Free)** tier, no Always On — chosen explicitly to spend no ongoing cost.
+- Azure resources: Function App on the classic **Consumption** plan with connection-string-based storage auth (not Flex Consumption / managed identity) — chosen explicitly to minimize the number of resources (no user-assigned identity, no role assignments) for this PoC's scale. The review app does not use an Azure resource at all — see Task 4 for why (App Service's F1 tier hit a subscription-level quota of 0, and the paid B1 tier was declined to avoid ongoing cost).
 - All resources go in one new resource group: `cisentinel-deploy-rg`, region `eastus` (adjust the region in every command below together if a different one is preferred — there's no per-resource reason to split them across regions).
 - Credentials live in each resource's **Application Settings** — no Key Vault.
 - **Execution model for this plan only, different from every prior sub-project's plan:** this session has no Azure CLI or Azure credentials of its own. Steps marked **(you, in your terminal)** are commands the user runs themselves, having already run `az login`; steps marked **(Claude)** are ones executed normally in this session (writing/testing code, or an external check like `curl` against a now-public URL that needs no Azure credentials). Every **(you, in your terminal)** step has an `Expected:` line — paste back what you actually see so the step can be confirmed before moving on, exactly like any other step in this plan.
@@ -26,7 +26,7 @@
 - A pipeline stage's `run()` reporting even one per-item error must stop `daily_pipeline` before the next stage runs — not just log the error and continue. This is the plan's central behavior change from "run manually and read the output" to "run unattended and trust it stopped when it should have."
 - `_run_stage` must call `ingest.run(client)` (no `openai_client` kwarg) specifically because the module *is* `ingest`, not because `openai_client` happens to be falsy or absent — a wrong branch here is a `TypeError` in production the first time the real pipeline runs, not a test failure caught locally, since `ingest.run()` only accepts one positional argument.
 - `openai_client.close()` must still run even when a stage raises partway through `daily_pipeline` — an oversight here leaks an HTTP client on every failed run, and failed runs are exactly the case this plan is built to make routine and visible (not rare).
-- The App Service must never be reachable unauthenticated, even briefly during initial deployment — Task 4 enables Easy Auth as part of the same task as the first deploy, not as a follow-up step, and its own completion contract requires confirming an unauthenticated request is actually blocked before the task is considered done.
+- The review app's privacy setting must be the very next action after its first deploy completes, before anything else — Task 4's own completion contract requires confirming an unauthenticated request is actually blocked before the task is considered done. (Streamlit Community Cloud's deploy flow doesn't support enabling privacy before the app is live the way Azure App Service's Easy Auth did; see Task 4's stated residual-risk note.)
 - A deliberately-failed pipeline run (Task 3's verification) must actually produce a received email, not just an `Alert Rule` that looks correctly configured in the portal — the difference between "configured" and "verified" matters here specifically because there is no unit test that can substitute for it.
 
 ---
@@ -224,7 +224,7 @@ def daily_pipeline(timer: func.TimerRequest) -> None:
 
 - [ ] **Step 5: Write `.funcignore`**
 
-Excludes everything from the deployment package that the Function App doesn't need — the local `.deps/` install (Azure's own remote build does its own `pip install` from `requirements.txt`, in a build environment matched to the target host, so bundling this repo's local install is both unnecessary and a needless few hundred MB), the test suite, git internals, worktrees, docs, the Supabase migrations folder, and the review app (App Service gets `review.py` separately in Task 4, not via this Function App's package):
+Excludes everything from the deployment package that the Function App doesn't need — the local `.deps/` install (Azure's own remote build does its own `pip install` from `requirements.txt`, in a build environment matched to the target host, so bundling this repo's local install is both unnecessary and a needless few hundred MB), the test suite, git internals, worktrees, docs, the Supabase migrations folder, and the review app (deployed separately in Task 4, not via this Function App's package):
 
 ```
 .git*
@@ -421,105 +421,66 @@ Ledger: `Task 3: complete (Alert Rule + Action Group configured and live-verifie
 
 ---
 
-### Task 4: Provision and deploy the review app, with Easy Auth from the first deploy
+### Task 4: Deploy the review app to Streamlit Community Cloud, private from the first moment it's checkable
 
-**Files:** none — Azure resource provisioning and a deploy of `review.py` (unchanged).
+**Files:** none — `review.py`/`review_data.py`/`db.py` deploy unchanged; no Azure resource involved in this task.
 
 **Interfaces:**
 - Consumes: `review.py`, `review_data.py`, `db.py`, `requirements.txt` — all already merged, unchanged.
 
-- [ ] **Step 1 (you, in your terminal): Create the App Service plan (F1, Linux)**
+**Why this replaces the original Azure App Service design:** this subscription's App Service F1 (Free) tier has a VM quota of 0 in every region tried, and B1 (~$13/month) was declined to avoid ongoing cost. Streamlit Community Cloud deploys directly from this repo's GitHub source (already public), is free with no VM quota of any kind, and — confirmed live against Streamlit's own docs before writing this task — supports both private apps ("Only specific people can view this app") and secrets that are automatically exposed as `os.environ` variables, so `db.py`'s existing `os.environ.get("SUPABASE_URL")`/`os.environ.get("SUPABASE_SERVICE_ROLE_KEY")` calls need no code change.
 
-```bash
-az appservice plan create \
-  --name cisentinel-review-plan \
-  --resource-group cisentinel-deploy-rg \
-  --location eastus \
-  --sku F1 \
-  --is-linux
+**A real difference from the Azure design, stated plainly:** Azure App Service let Easy Auth be enabled *before* the first deploy, so the app was never reachable unauthenticated even for a moment. Streamlit Community Cloud's deploy flow doesn't offer an equivalent — the app goes live first, and privacy is set as a separate action immediately after. This task's steps minimize that window (privacy is the very next action after deploy, before anything else, and is verified before the task is considered done) but — unlike Task 4's original design — cannot make the guarantee zero-width. This repo being public means anyone who somehow captured the exact freshly-generated URL during that short window could have reached the app; the deployed content only ever names things already visible in this public repo (no secrets in the app's own output), and the window closes as soon as Step 4 completes.
+
+- [ ] **Step 1 (you, in a browser): Sign in to Streamlit Community Cloud**
+
+Go to [share.streamlit.io](https://share.streamlit.io) and sign in with the GitHub account that owns `evanaparker/competitive-intelligence-sentinel` (the same account already used for this repo).
+
+Expected: you land on the Community Cloud workspace/dashboard.
+
+- [ ] **Step 2 (you, in a browser): Start deploying the app, but do not click the final Deploy button yet**
+
+Click "Create app" (or "New app"). Choose to deploy from an existing repo. Set:
+- Repository: `evanaparker/competitive-intelligence-sentinel`
+- Branch: `main`
+- Main file path: `review.py`
+
+- [ ] **Step 3 (you, in a browser): Set secrets via Advanced settings, before deploying**
+
+In the same deploy dialog, open "Advanced settings" → "Secrets", and paste:
+
+```toml
+SUPABASE_URL = "<your SUPABASE_URL>"
+SUPABASE_SERVICE_ROLE_KEY = "<your SUPABASE_SERVICE_ROLE_KEY>"
 ```
 
-Expected: JSON output with `"status": "Ready"`.
+Save the advanced settings, then click Deploy.
 
-- [ ] **Step 2 (you, in your terminal): Create the Web App**
+Expected: a build log appears, installing `requirements.txt` (this takes a minute or two — Streamlit Cloud's build environment installs everything itself, same as App Service's Oryx would have, no `.deps`/`PYTHONPATH` workaround needed here either). Note the app's URL once the build finishes (`https://<something>.streamlit.app`) — use that exact URL in every step below.
 
-```bash
-az webapp create \
-  --name cisentinel-review \
-  --resource-group cisentinel-deploy-rg \
-  --plan cisentinel-review-plan \
-  --runtime "PYTHON:3.12"
-```
+- [ ] **Step 4 (you, in a browser): Immediately set the app to private — the very next action after the build finishes, before anything else**
 
-Expected: JSON output with a `defaultHostName` of `cisentinel-review.azurewebsites.net`. Same name-uniqueness caveat as Task 2 — substitute and reuse a new name if this errors.
+From the app's page, open its settings (the "⋮" menu or "Settings") → "Sharing". Under "Who can view this app", select **"Only specific people can view this app"**. Add your own email as a viewer. Save.
 
-- [ ] **Step 3 (you, in your terminal): Set the startup command** (App Service's own Oryx build installs `requirements.txt` automatically on deploy — no `.deps`/`PYTHONPATH` workaround needed here, that was only ever this sandbox's fix for its own missing venv)
+Expected: the Sharing section confirms the app is private and lists your email as the only (or first) viewer.
+
+- [ ] **Step 5: Verify unauthenticated access is actually blocked**
 
 ```bash
-az webapp config set \
-  --name cisentinel-review \
-  --resource-group cisentinel-deploy-rg \
-  --startup-file "python -m streamlit run review.py --server.port 8000 --server.address 0.0.0.0"
+curl -s https://<your-app>.streamlit.app/ | grep -o "Competitive Intelligence Sentinel" || echo "app content not visible unauthenticated"
 ```
 
-Expected: JSON output showing the `appCommandLine` field set to the command above.
+Expected: `app content not visible unauthenticated` — the real app title must not appear in an anonymous fetch of the page. If the title *does* appear, stop: Step 4 didn't take effect (check the Sharing setting again) before proceeding.
 
-- [ ] **Step 4 (you, in your terminal): Set Application Settings** (only the Supabase credentials — `review.py` never calls an LLM)
+- [ ] **Step 6 (you, in a browser): Sign in and confirm the review app actually loads**
 
-```bash
-az webapp config appsettings set \
-  --name cisentinel-review \
-  --resource-group cisentinel-deploy-rg \
-  --settings \
-    SUPABASE_URL="<your SUPABASE_URL>" \
-    SUPABASE_SERVICE_ROLE_KEY="<your SUPABASE_SERVICE_ROLE_KEY>"
-```
-
-Expected: JSON array listing both settings back.
-
-- [ ] **Step 5 (you, in the Azure Portal): Enable Easy Auth BEFORE the first deploy of code** — this ordering matters: the app must never be reachable, even for the few minutes between a code deploy and enabling auth
-
-Portal → your Web App (`cisentinel-review`) → Authentication → Add identity provider → Microsoft Entra ID (Microsoft) → keep the default "Express" app registration (creates a new one scoped to just this app) → under "Restrict access", choose **"Require authentication"** → Action to take when request is not authenticated: **"HTTP 302 Found redirect... recommended for websites"** → Add.
-
-Expected: the Authentication blade shows Microsoft as an enabled identity provider, and "App Service authentication" is toggled on.
-
-- [ ] **Step 6: Verify unauthenticated access is actually blocked, before any code is deployed** — from this sandbox (a plain HTTPS request needs no Azure credentials)
-
-```bash
-curl -s -o /dev/null -w "%{http_code}\n" https://cisentinel-review.azurewebsites.net/
-```
-
-Expected: `302` (redirect to Microsoft's sign-in page) — not `200`. If this is `200`, stop: do not proceed to Step 7 until Step 5's configuration is fixed and this check passes.
-
-- [ ] **Step 7 (you, in your terminal): Deploy `review.py`**, run from the repo root
-
-```bash
-az webapp up \
-  --name cisentinel-review \
-  --resource-group cisentinel-deploy-rg \
-  --plan cisentinel-review-plan \
-  --runtime "PYTHON:3.12"
-```
-
-Expected: ends with a message confirming the app was deployed, giving the same `cisentinel-review.azurewebsites.net` URL.
-
-- [ ] **Step 8: Re-verify unauthenticated access is still blocked after deploy**
-
-```bash
-curl -s -o /dev/null -w "%{http_code}\n" https://cisentinel-review.azurewebsites.net/
-```
-
-Expected: `302`, unchanged from Step 6 — confirms the deploy didn't reset the Authentication setting.
-
-- [ ] **Step 9 (you, in a browser): Sign in and confirm the review app actually loads**
-
-Visit `https://cisentinel-review.azurewebsites.net/` in a browser, sign in with the Microsoft account tied to your Azure subscription when prompted, and confirm the Streamlit app loads (it will show "Nothing to review — no pending insights." unless there's a real pending insight, which is the correct, expected state).
+Visit the app's URL, sign in when prompted (Google OAuth or the emailed single-use link, per Streamlit's own flow for invited viewers), and confirm the Streamlit app loads (it will show "Nothing to review — no pending insights." unless there's a real pending insight, which is the correct, expected state).
 
 Expected: the app loads after sign-in, showing the same UI verified live in the Human Feedback Loop sub-project.
 
-- [ ] **Step 10: Record this task's completion**
+- [ ] **Step 7: Record this task's completion**
 
-Ledger: `Task 4: complete (App Service cisentinel-review deployed with Easy Auth enabled before the first deploy — unauthenticated access confirmed blocked (302) both before and after deploy, authenticated access confirmed working)`.
+Ledger: `Task 4: complete (review app deployed to Streamlit Community Cloud, set to private immediately after the build finished — unauthenticated access confirmed blocked, authenticated access confirmed working; no Azure resource used, no code changes needed)`.
 
 ---
 
@@ -535,26 +496,23 @@ Insert after the existing "## Running the review app" section:
 ```markdown
 ## Deployment
 
-The pipeline (`ingest.py` → `classify.py` → `correlate.py` → `score.py`) runs automatically once daily (06:00 UTC) on an Azure Function App (`cisentinel-pipeline`, resource group `cisentinel-deploy-rg`), via `function_app.py`'s `daily_pipeline` — the exact same `run()`/`format_line()` functions each script's own `__main__` block calls, wrapped in a Timer Trigger that stops at the first stage reporting an error rather than continuing to the next. A failed run triggers an Azure Monitor alert (`cisentinel-pipeline-failure-alert`) that emails the operator.
+The pipeline (`ingest.py` → `classify.py` → `correlate.py` → `score.py`) runs automatically once daily (06:00 UTC) on an Azure Function App (`cisentinel-pipeline`, resource group `cisentinel-deploy-rg`), via `function_app.py`'s `daily_pipeline` — the exact same `run()`/`format_line()` functions each script's own `__main__` block calls, wrapped in a Timer Trigger that stops at the first stage reporting an error rather than continuing to the next. A failed run triggers an Azure Monitor alert (`cisentinel-pipeline-failure-alert`) linked to an Action Group with an email notification (delivery of that email was not confirmed live — see the plan's ledger — the alert firing itself was confirmed via both the Azure Portal and the Alerts Management API).
 
-The review app is hosted at `https://cisentinel-review.azurewebsites.net/` (App Service, F1 Free tier, resource group `cisentinel-deploy-rg`) behind Microsoft Entra ID authentication (Easy Auth) — only the operator's Microsoft account can reach it.
+The review app is hosted on **Streamlit Community Cloud** (deployed from this repo's `main` branch, `review.py`) at `<the app's actual *.streamlit.app URL — fill in after Task 4>`, set to private ("Only specific people can view this app") — only explicitly invited viewers can reach it. Chosen over Azure App Service because this subscription's App Service F1 (Free) tier has a quota of 0, and the paid B1 tier was declined to avoid ongoing cost.
 
 Redeploying after a code change:
 
 ```bash
 # Pipeline
 func azure functionapp publish cisentinel-pipeline
-
-# Review app
-az webapp up --name cisentinel-review --resource-group cisentinel-deploy-rg --plan cisentinel-review-plan --runtime "PYTHON:3.12"
 ```
 
-Both commands run from the repo root and require the Azure CLI (and, for the Function App, Azure Functions Core Tools) already authenticated via `az login`. Neither is automated (no CI/CD) — deploying is a manual step the operator runs when there's something new to ship, matching this PoC's single-operator, infrequent-deploy scale.
+The review app redeploys itself automatically on every push to `main` (Streamlit Community Cloud watches the connected GitHub repo) — no manual redeploy command for it. The pipeline's redeploy command runs from the repo root and requires the Azure CLI and Azure Functions Core Tools already authenticated via `az login`. Neither this nor the review app's auto-redeploy is CI/CD in the tested/gated sense — there's no test run before either goes live, matching this PoC's single-operator, infrequent-deploy scale.
 ```
 
 - [ ] **Step 2: Verify**
 
-Run: `grep -q "cisentinel-pipeline" README.md && grep -q "cisentinel-review" README.md && echo "README documents deployment"`
+Run: `grep -q "cisentinel-pipeline" README.md && grep -q "streamlit.app" README.md && echo "README documents deployment"`
 Expected: `README documents deployment`.
 
 - [ ] **Step 3: Commit**
